@@ -1,3 +1,5 @@
+task.wait(5)
+
 -- AoT:R Freemium by 777KM
 -- UI: Obsidian (https://github.com/deividcomsono/Obsidian)
 
