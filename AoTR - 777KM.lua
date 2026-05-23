@@ -879,6 +879,11 @@ end)
 -- UI Settings tab (menu key, themes, configs)
 --===========================================================
 local MenuGroup = Tabs["UI Settings"]:AddLeftGroupbox("Menu", "wrench")
+MenuGroup:AddToggle("AutoCloseUI", {
+    Text    = "Auto Close UI",
+    Default = false,
+    Tooltip = "Hides the menu automatically on script load (press the menu keybind to reopen).",
+})
 MenuGroup:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", {
     Default = "RightControl",
     NoUI    = true,
@@ -897,6 +902,16 @@ SaveManager:SetFolder("777KM/AoTR")
 SaveManager:BuildConfigSection(Tabs["UI Settings"])
 ThemeManager:ApplyToTab(Tabs["UI Settings"])
 SaveManager:LoadAutoloadConfig()
+
+-- Auto Close UI: respect the user's saved preference. Runs after autoload
+-- so the toggle value has been restored. Library.Toggled is Obsidian's
+-- visibility flag; setting it false then re-toggling collapses the menu
+-- exactly as if the user pressed the keybind.
+if Toggles.AutoCloseUI and Toggles.AutoCloseUI.Value then
+    pcall(function()
+        if Library.Toggle then Library:Toggle() else Library.Toggled = false end
+    end)
+end
 
 --===========================================================
 -- Unload cleanup
