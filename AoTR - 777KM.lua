@@ -596,6 +596,12 @@ end
 -- (positions you every frame). Single source of truth, no double-CFrame.
 local currentTarget = nil
 
+-- Set true while Auto Refill is TP'd to HQ and waiting for the refill to
+-- land. Pauses Slash spam (which would block the refill remote server-side)
+-- AND the hover loop (which would yank the player back above the titan
+-- before the refill remote was accepted).
+local refillingNow = false
+
 -- Hover loop: runs on Heartbeat (every frame) so gravity never gets a chance
 -- to pull you down between AutoKill ticks. Also zeroes velocity so a titan
 -- swat can't fling you out of position.
@@ -633,7 +639,7 @@ task.spawn(function()
             local paceHold = shouldPaceWait()
 
             local POST = getPOST()
-            if POST and not needPause and not paceHold then
+            if POST and not needPause and not paceHold and not refillingNow then
                 -- One Slash unlocks the hit window
                 pcall(function() POST:FireServer("Attacks", "Slash", true) end)
 
@@ -723,20 +729,35 @@ local function getButtonsFrame()
     return iface and iface:FindFirstChild("Buttons")
 end
 
+-- Each map has its own GasTanks assembly under a different parent (lobby:
+-- Unclimbable.Props.HQ.GasTanks ; current map: Climbable._Walls.Gate.GasTanks ;
+-- other maps likely elsewhere). Instead of hardcoding per-map paths, locate
+-- any container named "GasTanks" in workspace and grab its Refill child.
+-- Cached because GetDescendants on the world is expensive — invalidated
+-- when the cached part loses its parent (map change / respawn).
+local cachedRefill = nil
 local function getRefillPart()
-    local u = Workspace:FindFirstChild("Unclimbable")
-    local p = u and u:FindFirstChild("Props")
-    local h = p and p:FindFirstChild("HQ")
-    local g = h and h:FindFirstChild("GasTanks")
-    return g and g:FindFirstChild("Refill")
+    if cachedRefill and cachedRefill.Parent then return cachedRefill end
+    cachedRefill = nil
+    for _, d in ipairs(Workspace:GetDescendants()) do
+        if d.Name == "GasTanks" then
+            local r = d:FindFirstChild("Refill")
+            if r and r:IsA("BasePart") then
+                cachedRefill = r
+                return r
+            end
+        end
+    end
+    return nil
 end
+LocalPlayer.CharacterAdded:Connect(function() cachedRefill = nil end)
 
 --------- Auto Reload (blade durability -> fire Blades/Reload) ---------
 -- Gradient.Offset.X is the durability ratio: 0 = empty, 1 = full.
 local autoReloadCooldown = 0
 task.spawn(function()
     while not Library.Unloaded do
-        if Toggles.AutoReload.Value then
+        if Toggles.AutoReload.Value and not refillingNow then
             local g = getBladeGradient()
             if g and tick() > autoReloadCooldown then
                 local x = g.Offset and g.Offset.X or 1
@@ -755,31 +776,79 @@ end)
 
 --------- Auto Refill (sets "0 / N" AND durability empty -> fire Attacks/Reload) ---------
 -- Only fires when BOTH conditions hold: no blade sets left AND the current
--- blade's durability is also at 0. Otherwise the player can still get use
--- out of the current blade via a normal reload first.
+-- blade's durability is also at 0. The refill remote has a server-side
+-- proximity check on the HQ refill part, so we TP the player there and
+-- raise `refillingNow` to mute the Slash spam + hover loop while waiting
+-- for the refill to land. Restores the player's original position after.
+local function readSetsCount()
+    local sets = getBladeSetsLabel(); if not sets then return nil end
+    -- "Sets" might be the TextLabel itself OR a frame containing one,
+    -- depending on whether the HUD got re-themed. Handle both.
+    local txt
+    if sets:IsA("TextLabel") or sets:IsA("TextBox") then
+        txt = sets.Text
+    else
+        for _, c in ipairs(sets:GetDescendants()) do
+            if (c:IsA("TextLabel") or c:IsA("TextBox")) and c.Text:find("%d") then
+                txt = c.Text
+                break
+            end
+        end
+    end
+    if not txt then return nil end
+    return tonumber(txt:match("(%d+)"))
+end
+
 local autoRefillCooldown = 0
+
+-- Fire the refill remote directly with the dynamically-found Refill part.
+-- No TP needed — the server doesn't proximity-check, it just needs the
+-- attack window from the last Slash to be clear (the 1s pause handles
+-- that via refillingNow muting the kill + reload loops).
+local function doRefillRoutine()
+    if refillingNow then return false end
+    local refill = getRefillPart()
+    local POST   = getPOST()
+    if not (refill and POST) then
+        warn(string.format("[Refill] missing piece: refill=%s POST=%s",
+            tostring(refill), tostring(POST)))
+        return false
+    end
+    refillingNow = true
+    task.wait(1)  -- let any in-flight Slash attack window expire
+    pcall(function() POST:FireServer("Attacks", "Reload", refill) end)
+    -- Wait for sets to recover (or 3s safety timeout).
+    local startWait = tick()
+    while tick() - startWait < 3 do
+        local n = readSetsCount()
+        if n and n > 0 then break end
+        task.wait(0.1)
+    end
+    refillingNow = false
+    autoRefillCooldown = tick() + 2
+    return true
+end
+
 task.spawn(function()
     while not Library.Unloaded do
-        if Toggles.AutoRefill.Value then
-            local sets = getBladeSetsLabel()
-            if sets and tick() > autoRefillCooldown then
-                local txt = (sets:IsA("TextLabel") or sets:IsA("TextBox")) and sets.Text or ""
-                local current = tonumber((txt:match("^%s*(%d+)") or ""))
-                local setsEmpty = current == 0
-                local durEmpty  = bladeRatio() < EMPTY_BELOW
-                if setsEmpty and durEmpty then
-                    local refill = getRefillPart()
-                    local POST   = getPOST()
-                    if refill and POST then
-                        pcall(function() POST:FireServer("Attacks", "Reload", refill) end)
-                        autoRefillCooldown = tick() + 2
-                    end
-                end
+        if Toggles.AutoRefill.Value and not refillingNow and tick() > autoRefillCooldown then
+            local current = readSetsCount()
+            local setsEmpty = current == 0
+            local durEmpty  = bladeRatio() < EMPTY_BELOW
+            if setsEmpty and durEmpty then
+                doRefillRoutine()
             end
         end
         task.wait(0.4)
     end
 end)
+
+UtilBox:AddButton({
+    Text = "Refill Now",
+    Func = function()
+        task.spawn(doRefillRoutine)
+    end,
+})
 
 --------- Auto Escape (button appears in Interface.Buttons -> Slash_Escape) ---------
 -- The game shows an escape prompt by inserting a button into Interface.Buttons
