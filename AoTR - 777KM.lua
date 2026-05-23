@@ -933,13 +933,18 @@ local function getRetryButton()
     return buttons:FindFirstChild("Retry")
 end
 
-local autoRetryCooldown = 1
+-- 5s cooldown on first execution so the script doesn't auto-retry the
+-- instant it loads (e.g., if a Rewards frame is already visible).
+local autoRetryCooldown = tick() + 5
 task.spawn(function()
     while not Library.Unloaded do
         if Toggles.AutoRetry.Value and tick() > autoRetryCooldown then
             local r = getRewardsFrame()
             if r and r.Visible then
-                autoRetryCooldown = tick() + 5
+                -- 2s cooldown so we re-fire if the first click/remote
+                -- silently failed; the Rewards frame turning invisible
+                -- naturally stops the loop on success.
+                autoRetryCooldown = tick() + 2
                 task.wait(0.5)
                 local btn = getRetryButton()
                 if btn then clickUI(btn) end
