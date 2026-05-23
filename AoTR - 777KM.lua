@@ -278,6 +278,21 @@ MiscBox:AddButton({
     end,
 })
 
+-- Lobby JobId captured from Roblox.GameLauncher.joinGameInstance; same
+-- placeId/jobId pair the website uses for the AoT:R lobby instance.
+MiscBox:AddButton({
+    Text = "Return to Lobby",
+    Func = function()
+        pcall(function()
+            game:GetService("TeleportService"):TeleportToPlaceInstance(
+                14916516914,
+                "a71dbaf1-06bc-4815-9cb2-fddf9ba88ff3",
+                LocalPlayer
+            )
+        end)
+    end,
+})
+
 local CreditsBox = Tabs.Misc:AddRightGroupbox("Credits", "heart")
 CreditsBox:AddLabel("AoT:R Freemium by 777KM", true)
 CreditsBox:AddLabel("UI: Obsidian by deividcomsono", true)
