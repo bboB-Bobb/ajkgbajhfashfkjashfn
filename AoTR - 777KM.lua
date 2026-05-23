@@ -846,7 +846,7 @@ local function getRetryButton()
     return buttons:FindFirstChild("Retry")
 end
 
-local autoRetryCooldown = 5
+local autoRetryCooldown = 1
 task.spawn(function()
     while not Library.Unloaded do
         if Toggles.AutoRetry.Value and tick() > autoRetryCooldown then
