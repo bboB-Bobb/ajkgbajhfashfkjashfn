@@ -504,6 +504,16 @@ end)
 local PACE_MIN, PACE_MAX = 33, 35
 local sessionStart, sessionInitialCount, sessionTargetDuration = nil, 0, 32.5
 
+-- Use the game's own mission timer (workspace.Seconds attribute) instead of
+-- the client's tick() — it's the same clock the server compares against for
+-- anti-cheat heuristics, so pacing against it is what actually matters.
+-- Falls back to tick() in lobby / between missions when the attribute is unset.
+local function gameTime()
+    local s = Workspace:GetAttribute("Seconds")
+    if type(s) == "number" then return s end
+    return tick()
+end
+
 local function resetPaceSession()
     sessionStart, sessionInitialCount = nil, 0
 end
@@ -514,16 +524,24 @@ local function shouldPaceWait()
         resetPaceSession()
         return false
     end
+    local now = gameTime()
     if not sessionStart then
-        sessionStart            = tick()
+        sessionStart            = now
         sessionInitialCount     = alive
         sessionTargetDuration   = PACE_MIN + math.random() * (PACE_MAX - PACE_MIN)
         return false  -- never delay the very first kill
     end
+    -- workspace.Seconds resets between missions. If it jumped backwards,
+    -- treat it as a new mission and reseed the session.
+    if now < sessionStart then
+        sessionStart        = now
+        sessionInitialCount = alive
+        return false
+    end
     if alive > sessionInitialCount then
         sessionInitialCount = alive  -- wave grew — extend the schedule
     end
-    local elapsed         = tick() - sessionStart
+    local elapsed         = now - sessionStart
     local killsDone       = sessionInitialCount - alive
     local scheduledByNow  = math.min(1, elapsed / sessionTargetDuration) * sessionInitialCount
     return killsDone >= scheduledByNow  -- true → ahead of schedule, hold off
