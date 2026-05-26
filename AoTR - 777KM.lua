@@ -1849,27 +1849,7 @@ task.spawn(function()
                 bumpGamesPlayed()  -- persistent total (saved to file)
                 local n = matchCount
                 task.spawn(function()
-                    -- Only wait for sniffer capture if the sniffer is on.
-                    -- When off, fetchRewardsRemote() actively probes
-                    -- S_Rewards/Get/Last as fallback — no need to wait.
-                    if SNIFFER_ENABLED then
-                        local waited = 0
-                        while waited < 6 do
-                            if latestRewardsCapture
-                               and type(latestRewardsCapture.data) == "table" then
-                                break
-                            end
-                            task.wait(0.25)
-                            waited = waited + 0.25
-                        end
-                    end
-
-                    -- Fire Data/Copy IN PARALLEL with the webhook send so
-                    -- both network round-trips overlap. sendMatchWebhook
-                    -- does its own S_Rewards/Get/Last fetch internally,
-                    -- and the latestPlayerData cache may be slightly
-                    -- behind (last 30s background poll) but the webhook
-                    -- still reads it via getGold/getGems.
+                    -- Fire Data/Copy refresh in parallel (network overlap).
                     task.spawn(function()
                         local assets  = RS:FindFirstChild("Assets")
                         local remotes = assets and assets:FindFirstChild("Remotes")
@@ -1881,6 +1861,31 @@ task.spawn(function()
                             end
                         end
                     end)
+
+                    -- Actively poll S_Rewards/Get/"Last" (non-consuming
+                    -- variant) until the server returns a populated table.
+                    -- Server typically takes 1-3s after match end to have
+                    -- the rewards data ready. Poll every 300ms up to 8s
+                    -- total. Cache the result so sendMatchWebhook reads it
+                    -- via its existing fetchRewardsRemote path.
+                    if not (latestRewardsCapture
+                            and type(latestRewardsCapture.data) == "table") then
+                        local pollStart = tick()
+                        while tick() - pollStart < 8 do
+                            local assets  = RS:FindFirstChild("Assets")
+                            local remotes = assets and assets:FindFirstChild("Remotes")
+                            local GET     = remotes and remotes:FindFirstChild("GET")
+                            if GET then
+                                local ok, r = pcall(GET.InvokeServer,
+                                    GET, "S_Rewards", "Get", "Last")
+                                if ok and type(r) == "table" then
+                                    latestRewardsCapture = { ts = tick(), data = r }
+                                    break
+                                end
+                            end
+                            task.wait(0.3)
+                        end
+                    end
 
                     if Toggles.WebhookEnabled and Toggles.WebhookEnabled.Value then
                         sendMatchWebhook(n)
