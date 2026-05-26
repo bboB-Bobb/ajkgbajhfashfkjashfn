@@ -452,6 +452,33 @@ local function newDumpSink()
     return p, flush
 end
 
+--------- Games Played counter (persists across script reloads) ---------
+-- Per-user .txt file in the executor workspace. Read once at load, then
+-- incremented + saved on every match end. Survives script unload/reload
+-- and game session restarts as long as the file isn't deleted.
+local GAMES_PLAYED_FILE = "AOTR_GamesPlayed_" .. tostring(LocalPlayer.UserId) .. ".txt"
+local gamesPlayed = 0
+do
+    local reader = readfile or (syn and syn.read_file)
+    local exists = isfile   or (syn and syn.isfile)
+    if reader and exists then
+        local ok, has = pcall(exists, GAMES_PLAYED_FILE)
+        if ok and has then
+            local rok, content = pcall(reader, GAMES_PLAYED_FILE)
+            if rok and content then
+                local n = tonumber((content:match("%d+")))
+                if n then gamesPlayed = n end
+            end
+        end
+    end
+end
+
+local function bumpGamesPlayed()
+    gamesPlayed = gamesPlayed + 1
+    local writer = writefile or (syn and syn.write_file) or (fluxus and fluxus.writefile)
+    if writer then pcall(writer, GAMES_PLAYED_FILE, tostring(gamesPlayed)) end
+end
+
 --------- FOV ---------
 Options.FOV:OnChanged(function()
     Camera.FieldOfView = Options.FOV.Value
@@ -1631,8 +1658,9 @@ sendMatchWebhook = function(matchNum)
 
     -- ===== Information (left column) =====
     local infoBlock = codeBlock(string.format(
-        "User: %s\nMatch: #%d\nResult: %s\nTime: %s",
+        "User: %s\nMatch: #%d\nGames Played: %s\nResult: %s\nTime: %s",
         username, matchNum,
+        fmtNum(gamesPlayed),
         win and "Victory" or "Defeat",
         timeStr))
 
@@ -1646,8 +1674,8 @@ sendMatchWebhook = function(matchNum)
 
     -- ===== Combat (right column) =====
     local combatBlock = codeBlock(string.format(
-        "Damage: %s\nKills:  %s\nCrits:  %s\nBoss:   %s",
-        fmtNum(s.Damage), fmtNum(s.Kills), fmtNum(s.Crits), fmtNum(s.Boss_Damage)))
+        "Damage: %s\nKills:  %s\nCrits:  %s",
+        fmtNum(s.Damage), fmtNum(s.Kills), fmtNum(s.Crits)))
 
     local fields = {
         { name = "Information", value = infoBlock,   inline = true },
@@ -1818,6 +1846,7 @@ task.spawn(function()
                     lastMatchSeconds = math.floor(tick() - matchStartTick)
                 end
                 matchCount = matchCount + 1
+                bumpGamesPlayed()  -- persistent total (saved to file)
                 local n = matchCount
                 task.spawn(function()
                     -- Wait for sniffer capture (up to 6s after match end)
