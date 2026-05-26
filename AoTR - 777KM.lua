@@ -954,36 +954,48 @@ local sniffHookSrc = ([[
 
     local old
     local hookFn = function(self, ...)
-        local args = { ... }
-        local function callOrig()
-            if SETID then
-                local saved = GETID and GETID() or nil
-                pcall(SETID, 8)
-                local packed = table.pack(pcall(old, self, ...))
-                if saved then pcall(SETID, saved) end
-                if packed[1] then return table.unpack(packed, 2, packed.n) end
-                error(packed[2], 2)
-            end
-            return old(self, ...)
-        end
+        -- pack everything once so we can reuse below without `...` leaking
+        -- into a nested non-vararg function (that's a Lua parse error).
+        local args = table.pack(...)
 
+        local interesting = false
         if self == GET then
             local okC, isExecutor = pcall(checkcaller)
             local okM, m = pcall(getnamecallmethod)
             if okC and not isExecutor and okM and m == "InvokeServer" and args[1] == "S_Rewards" then
-                local result = callOrig()
-                pcall(function()
-                    bridge:Fire({
-                        service = args[1],
-                        action  = args[2],
-                        arg3    = args[3],
-                        result  = result,
-                    })
-                end)
-                return result
+                interesting = true
             end
         end
-        return callOrig()
+
+        -- Call original with identity elevation (game scripts hold identity 8;
+        -- our executor thread is lower and downstream Instance access fails).
+        local results
+        if SETID then
+            local saved = GETID and GETID() or nil
+            pcall(SETID, 8)
+            results = table.pack(pcall(old, self, ...))
+            if saved then pcall(SETID, saved) end
+        else
+            results = table.pack(pcall(old, self, ...))
+        end
+
+        if not results[1] then
+            error(results[2], 2)
+        end
+
+        if interesting then
+            local returnVal = results[2]
+            pcall(function()
+                bridge:Fire({
+                    service = args[1],
+                    action  = args[2],
+                    arg3    = args[3],
+                    result  = returnVal,
+                })
+            end)
+        end
+
+        return table.unpack(results, 2, results.n)
     end
     old = hookmetamethod(game, "__namecall", newcclosure(hookFn))
 ]]):format(SNIFF_BRIDGE)
@@ -1269,120 +1281,113 @@ task.spawn(function()
 end)
 
 --------- Match-end webhook (edge-triggered on Rewards.Visible) ---------
--- Independent of AutoRetry: webhook fires on every match end whether or
--- not AutoRetry is enabled. Win vs Loss is detected by scanning the
--- Rewards subtree for "MISSION COMPLETED" (case-insensitive substring).
--- S_Rewards/Get returns nil for both args, so the embed is built entirely
--- from the Rewards UI subtree (paths confirmed via Spy Money Path dump):
---   Rewards.Main.Info.Main.Stats.{Damage,Kills,Crits,Time}.Amount
---   Rewards.Main.Info.Main.Items.<row>_<col>.Main.Inner.Quantity
+-- Independent of AutoRetry: fires on every match end whether or not AutoRetry
+-- is enabled. Primary data source is the remote GET("S_Rewards","Get","Match"),
+-- which returns the full mission summary as a structured table — confirmed via
+-- the actor sniffer + dump button on 2026-05-26.
+-- Shape:
+--   { Completed, Seconds, Claimed,
+--     Stats    = { Damage, Kills, Crits, Boss_Damage },
+--     Obtained = { Gold, XP, Silver, BP_XP, Shards, Gems, Canes,
+--                  Perks={...}, Drops={...}, Chests={...} } }
+-- "Get All" returns identical data. "Get true/false/nil/plr/name/Last/Current"
+-- all return nil for us — server appears to whitelist specific action strings.
 
--- Index 1 of Items = currency row (EXP / Gold / ?? / Crystal / ...).
--- Index 2 of Items = gear row (5 grey-tier item slots).
-local ITEM_LABELS = {
-    ["1_1"] = "EXP",
-    ["1_2"] = "Gold",
-    ["1_3"] = "Slot 1_3",
-    ["1_4"] = "Crystal",
-    ["1_5"] = "Slot 1_5",
-    ["2_1"] = "Item 1",
-    ["2_2"] = "Item 2",
-    ["2_3"] = "Item 3",
-    ["2_4"] = "Item 4",
-    ["2_5"] = "Item 5",
-}
-
-local function readText(inst)
-    if not inst then return nil end
-    local ok, t = pcall(function() return inst.Text end)
-    if not ok or t == nil or t == "" then return nil end
-    return t
+local function fetchRewardsRemote()
+    local GET = getGET(); if not GET then return nil end
+    local ok, result = pcall(GET.InvokeServer, GET, "S_Rewards", "Get", "Match")
+    if ok and type(result) == "table" then return result end
+    return nil
 end
 
-local function getRewardsInfoMain()
-    local r = getRewardsFrame(); if not r then return nil end
-    local main = r:FindFirstChild("Main"); if not main then return nil end
-    local info = main:FindFirstChild("Info"); if not info then return nil end
-    return info:FindFirstChild("Main")
-end
-
-local function detectWin()
-    local r = getRewardsFrame(); if not r then return false end
-    for _, d in ipairs(r:GetDescendants()) do
-        if d:IsA("TextLabel") or d:IsA("TextBox") then
-            local t = d.Text
-            if t and string.find(string.upper(t), "MISSION COMPLETED", 1, true) then
-                return true
-            end
-        end
-    end
-    return false
-end
-
-local function readStat(infoMain, name)
-    local stats = infoMain and infoMain:FindFirstChild("Stats")
-    local row   = stats and stats:FindFirstChild(name)
-    local amt   = row and row:FindFirstChild("Amount")
-    return readText(amt)
-end
-
-local function readItem(infoMain, key)
-    local items = infoMain and infoMain:FindFirstChild("Items")
-    local slot  = items and items:FindFirstChild(key)
-    local main  = slot and slot:FindFirstChild("Main")
-    local inner = main and main:FindFirstChild("Inner")
-    local qty   = inner and inner:FindFirstChild("Quantity")
-    return readText(qty)
+local function fmtSeconds(s)
+    s = tonumber(s); if not s then return "?" end
+    local m = math.floor(s / 60)
+    local r = s % 60
+    return string.format("%02d:%02d", m, r)
 end
 
 sendMatchWebhook = function(matchNum)
-    local infoMain = getRewardsInfoMain()
-    local win      = detectWin()
-    local money    = getMoney()
+    local data  = fetchRewardsRemote()
+    local money = getMoney()
 
-    local stats = {
-        Time   = readStat(infoMain, "Time"),
-        Damage = readStat(infoMain, "Damage"),
-        Kills  = readStat(infoMain, "Kills"),
-        Crits  = readStat(infoMain, "Crits"),
-    }
+    local win, fields
+    if data then
+        -- Trust the remote completely; it's authoritative server-side data.
+        win = data.Completed == true
+        local s = data.Stats    or {}
+        local o = data.Obtained or {}
 
-    local obtainedLines = {}
-    for key, label in pairs(ITEM_LABELS) do
-        local v = readItem(infoMain, key)
-        if v then
-            obtainedLines[#obtainedLines + 1] = string.format("%s: %s", label, v)
+        local function fmt(v)
+            if v == nil then return "0" end
+            if type(v) == "number" then return tostring(v) end
+            return tostring(v)
         end
-    end
-    table.sort(obtainedLines)  -- deterministic order
 
-    local fields = {}
-    fields[#fields + 1] = {
-        name   = "Match",
-        value  = string.format("#%d  -  %s", matchNum, win and "WIN" or "LOSS"),
-        inline = false,
-    }
-    fields[#fields + 1] = {
-        name   = "Money (Gold)",
-        value  = money and tostring(money) or "?",
-        inline = true,
-    }
-    fields[#fields + 1] = {
-        name   = "Stats",
-        value  = string.format(
-            "Time: %s\nDamage: %s\nKills: %s\nCrits: %s",
-            stats.Time   or "?",
-            stats.Damage or "?",
-            stats.Kills  or "?",
-            stats.Crits  or "?"
-        ),
-        inline = false,
-    }
-    if #obtainedLines > 0 then
+        fields = {}
         fields[#fields + 1] = {
-            name   = "Obtained",
-            value  = table.concat(obtainedLines, "\n"),
+            name   = "Match",
+            value  = string.format("#%d  -  %s", matchNum, win and "WIN" or "LOSS"),
             inline = false,
+        }
+        fields[#fields + 1] = {
+            name   = "Time",
+            value  = fmtSeconds(data.Seconds),
+            inline = true,
+        }
+        fields[#fields + 1] = {
+            name   = "Money (Gold)",
+            value  = money and tostring(money) or "?",
+            inline = true,
+        }
+        fields[#fields + 1] = {
+            name   = "Stats",
+            value  = string.format(
+                "Damage: %s\nKills: %s\nCrits: %s\nBoss DMG: %s",
+                fmt(s.Damage), fmt(s.Kills), fmt(s.Crits), fmt(s.Boss_Damage)
+            ),
+            inline = false,
+        }
+        -- Currencies/items. Show only non-zero numerics so the embed stays clean.
+        local obtainedLines = {}
+        local order = { "XP", "Gold", "Silver", "Gems", "Shards", "BP_XP", "Canes" }
+        for _, k in ipairs(order) do
+            local v = o[k]
+            if type(v) == "number" and v > 0 then
+                obtainedLines[#obtainedLines + 1] = string.format("%s: %s", k, tostring(v))
+            end
+        end
+        -- Perks (string list)
+        if type(o.Perks) == "table" and #o.Perks > 0 then
+            obtainedLines[#obtainedLines + 1] = "Perks: " .. table.concat(o.Perks, ", ")
+        end
+        -- Drops / Chests (only if populated; empty tables hidden)
+        for _, k in ipairs({ "Drops", "Chests" }) do
+            local t = o[k]
+            if type(t) == "table" and next(t) then
+                local parts = {}
+                for kk, vv in pairs(t) do
+                    parts[#parts + 1] = tostring(kk) .. "=" .. tostring(vv)
+                end
+                obtainedLines[#obtainedLines + 1] = k .. ": " .. table.concat(parts, ", ")
+            end
+        end
+        if #obtainedLines > 0 then
+            fields[#fields + 1] = {
+                name   = "Obtained",
+                value  = table.concat(obtainedLines, "\n"),
+                inline = false,
+            }
+        end
+    else
+        -- Remote was nil — likely we polled outside the window the server
+        -- responds in. Send a minimal embed so the user still sees the match.
+        win = false
+        fields = {
+            { name = "Match", value = string.format("#%d", matchNum), inline = false },
+            { name = "Status", value = "S_Rewards/Get returned nil at match-end. " ..
+                "Check the AOTR.lua trigger timing.", inline = false },
+            { name = "Money (Gold)", value = money and tostring(money) or "?", inline = true },
         }
     end
 
