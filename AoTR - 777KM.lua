@@ -1716,13 +1716,19 @@ end
 local matchCount         = 0
 local lastRewardsVisible = false
 
--- ===== In-match detection via workspace.Modifiers attribute =====
--- The game sets a "Modifiers" attribute on Workspace only while the
--- player is in an active mission. Lobby = nil; in-match = non-nil (often
--- an empty table when no special modifiers are active). Reliable across
--- both win and death since both end the mission and clear the attribute.
+-- ===== In-match detection =====
+-- Two reliable signals; either being present means we're mid-mission:
+--   1. Workspace:GetAttribute("Modifiers") is non-nil
+--   2. ReplicatedStorage.Assets.Remotes.GET_2 exists (the per-match
+--      RemoteFunction the game spawns on mission start, destroys on end)
+-- We OR them so detection works even if one signal misfires on a given
+-- mission type or executor.
 local function isInMatch()
-    return Workspace:GetAttribute("Modifiers") ~= nil
+    if Workspace:GetAttribute("Modifiers") ~= nil then return true end
+    local assets  = RS:FindFirstChild("Assets")
+    local remotes = assets and assets:FindFirstChild("Remotes")
+    if remotes and remotes:FindFirstChild("GET_2") then return true end
+    return false
 end
 
 -- Match duration tracking. tick()-based diff is the only timing source we
@@ -1747,6 +1753,28 @@ Workspace:GetAttributeChangedSignal("Modifiers"):Connect(function()
         lastInMatch    = true
     end
 end)
+
+-- THE most reliable match-start signal: GET_2 only exists during a match.
+-- The game spawns it on mission start, destroys it on mission end. Hook
+-- ChildAdded on the Remotes folder and stamp matchStartTick the instant
+-- GET_2 appears.
+do
+    local assets  = RS:FindFirstChild("Assets")
+    local remotes = assets and assets:FindFirstChild("Remotes")
+    if remotes then
+        remotes.ChildAdded:Connect(function(c)
+            if c.Name == "GET_2" then
+                matchStartTick = tick()
+                lastInMatch    = true
+            end
+        end)
+        -- Seed if GET_2 is already present at script load
+        if remotes:FindFirstChild("GET_2") and not matchStartTick then
+            matchStartTick = tick()
+            lastInMatch    = true
+        end
+    end
+end
 task.spawn(function()
     while not Library.Unloaded do
         local r = getRewardsFrame()
