@@ -1544,6 +1544,53 @@ UtilBox:AddButton({
 })
 
 UtilBox:AddButton({
+    Text = "Dump Perks + Stats",
+    Func = function()
+        local function deep(t, indent, seen, depthLimit, depth)
+            indent = indent or "  "
+            seen = seen or {}
+            depthLimit = depthLimit or 4
+            depth = depth or 0
+            if seen[t] then print(indent .. "<cyclic>") return end
+            if depth > depthLimit then print(indent .. "<max depth>") return end
+            seen[t] = true
+            for k, v in pairs(t) do
+                if type(v) == "table" then
+                    print(indent .. tostring(k) .. " = {")
+                    deep(v, indent .. "  ", seen, depthLimit, depth + 1)
+                    print(indent .. "}")
+                elseif type(v) == "function" then
+                    print(indent .. tostring(k) .. " = <fn>")
+                else
+                    print(indent .. tostring(k) .. " = " .. tostring(v) .. "  (" .. type(v) .. ")")
+                end
+            end
+        end
+
+        local function tryRequire(path)
+            local node = RS
+            for _, seg in ipairs(path) do
+                node = node and node:FindFirstChild(seg)
+            end
+            if not node then return nil, "path not found" end
+            local ok, m = pcall(require, node)
+            if not ok then return nil, m end
+            return m
+        end
+
+        print("\n=========== PERKS MODULE ===========")
+        local perks, err = tryRequire({"Modules", "Storage", "Perks"})
+        if perks then deep(perks) else print("ERR:", err) end
+
+        print("\n=========== STATS MODULE ===========")
+        local stats, err2 = tryRequire({"Modules", "Utilities", "Stats"})
+        if stats then deep(stats, "  ", nil, 3) else print("ERR:", err2) end
+
+        Library:Notify("Perks + Stats dumped to console", 4)
+    end,
+})
+
+UtilBox:AddButton({
     Text = "Discover Profile",
     Func = function()
         print("\n========== PROFILE DISCOVERY ==========\n")
