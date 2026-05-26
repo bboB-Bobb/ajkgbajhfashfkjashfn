@@ -1516,15 +1516,22 @@ task.spawn(function()
         local r       = getRewardsFrame()
         local visible = r and r.Visible
 
-        if Toggles.AutoRetry.Value and visible then
+        -- "Match is done" gate — true whenever the Rewards screen is up
+        -- AND the field has no living titans. Mute toggled features in this
+        -- state so they don't waste server calls / risk weirdness between
+        -- matches, INDEPENDENT of AutoRetry being on. AutoRetry layers its
+        -- click+remote on top when its toggle is enabled.
+        local matchDone = visible and countAliveTitans() == 0
+
+        if matchDone then
             if not mutedForRetry then
                 mutedForRetry = true
                 -- One tick for the gameplay loops to notice and bail out
-                -- before we click — otherwise an in-flight Slash can still
-                -- be queued the instant the Rewards frame appears.
+                -- before any retry-click — otherwise an in-flight Slash
+                -- can still be queued the instant Rewards appears.
                 task.wait(0.4)
             end
-            if tick() > autoRetryCooldown then
+            if Toggles.AutoRetry.Value and tick() > autoRetryCooldown then
                 -- 2s cooldown so we re-fire if the first click/remote
                 -- silently failed; the Rewards frame turning invisible
                 -- naturally stops the loop on success.
@@ -1724,22 +1731,36 @@ end
 -- already lost by the time we sample.
 local lastMatchSeconds = nil
 local matchStartTick   = nil
+-- Polled state so we can detect nil->non-nil Modifiers transitions in the
+-- main Rewards watcher loop (signal-based detection is unreliable on some
+-- executors when the attribute appears from nil for the first time).
+local lastInMatch      = isInMatch()
 
 -- Seed start tick if the script loaded while already in a match.
-if isInMatch() then matchStartTick = tick() end
+if lastInMatch then matchStartTick = tick() end
 
+-- Belt-and-suspenders: also hook the signal in case it works. Polling
+-- below is the guaranteed path.
 Workspace:GetAttributeChangedSignal("Modifiers"):Connect(function()
-    if isInMatch() then
-        -- Just transitioned into a match
+    if isInMatch() and not lastInMatch then
         matchStartTick = tick()
+        lastInMatch    = true
     end
-    -- (no-else: match-end timestamp is captured in the Rewards.Visible
-    -- watcher below — Modifiers may clear slightly before/after that edge)
 end)
 task.spawn(function()
     while not Library.Unloaded do
         local r = getRewardsFrame()
         local v = (r and r.Visible) or false
+
+        -- Poll-based Modifiers transition detection (backup to the
+        -- AttributeChangedSignal above). Catches nil->non-nil even on
+        -- executors where the signal doesn't fire for attribute appearance.
+        local nowInMatch = isInMatch()
+        if nowInMatch and not lastInMatch then
+            matchStartTick = tick()
+        end
+        lastInMatch = nowInMatch
+
         if v ~= lastRewardsVisible then
             if v then
                 -- Match just ended (Rewards visible — works for win + death).
