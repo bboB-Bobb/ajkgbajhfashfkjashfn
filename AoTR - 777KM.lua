@@ -1613,7 +1613,10 @@ sendMatchWebhook = function(matchNum)
         }
         fields[#fields + 1] = {
             name   = "Time",
-            value  = fmtSeconds(data.Seconds),
+            -- data.Seconds is always 0 in S_Rewards (server quirk). Prefer
+            -- lastMatchSeconds, which is read from workspace.Seconds at the
+            -- exact moment Rewards.Visible flipped true.
+            value  = fmtSeconds(lastMatchSeconds or data.Seconds),
             inline = true,
         }
         fields[#fields + 1] = {
@@ -1704,6 +1707,11 @@ end
 
 local matchCount         = 0
 local lastRewardsVisible = false
+-- Captured at the match-end edge from `workspace:GetAttribute("Seconds")`,
+-- which is the game's own elapsed-seconds counter for the mission. The
+-- server returns Seconds=0 inside S_Rewards (useless), so we read this
+-- attribute directly at edge time when it still holds the final value.
+local lastMatchSeconds = nil
 task.spawn(function()
     while not Library.Unloaded do
         local r = getRewardsFrame()
@@ -1715,6 +1723,10 @@ task.spawn(function()
                 -- webhook. Gold/Gems no longer needs accumulation — the
                 -- Data/Copy poll (separate 30s loop) keeps the profile
                 -- cache fresh with the authoritative server value.
+                local secondsAttr = Workspace:GetAttribute("Seconds")
+                if type(secondsAttr) == "number" then
+                    lastMatchSeconds = secondsAttr
+                end
                 matchCount = matchCount + 1
                 local n = matchCount
                 task.spawn(function()
