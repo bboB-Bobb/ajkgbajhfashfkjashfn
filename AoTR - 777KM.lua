@@ -1658,8 +1658,8 @@ sendMatchWebhook = function(matchNum)
 
     -- ===== Information (left column) =====
     local infoBlock = codeBlock(string.format(
-        "User: %s\nMatch: #%d\nGames Played: %s\nResult: %s\nTime: %s",
-        username, matchNum,
+        "User: %s\nGames Played: %s\nResult: %s\nTime: %s",
+        username,
         fmtNum(gamesPlayed),
         win and "Victory" or "Defeat",
         timeStr))
@@ -1746,7 +1746,7 @@ sendMatchWebhook = function(matchNum)
             color       = win and 0xFFD700 or 0xED4245,
             fields      = fields,
             footer      = {
-                text = string.format("AoT:R Freemium by 777KM  •  Match #%d", matchNum),
+                text = "AoT:R Freemium by 777KM",
             },
             timestamp   = os.date("!%Y-%m-%dT%H:%M:%SZ"),
         }},
