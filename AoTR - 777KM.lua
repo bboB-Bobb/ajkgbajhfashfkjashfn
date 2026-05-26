@@ -293,6 +293,23 @@ MiscBox:AddButton({
     end,
 })
 
+MiscBox:AddButton({
+    Text = "Check Shadow Banned",
+    Func = function()
+        local exploiter = LocalPlayer:GetAttribute("Exploiter")
+        local blacklist = LocalPlayer:GetAttribute("Blacklist")
+        local flagged = exploiter == true or blacklist == true
+        if flagged then
+            Library:Notify(string.format(
+                "SHADOW BANNED — Exploiter=%s Blacklist=%s",
+                tostring(exploiter), tostring(blacklist)
+            ), 6)
+        else
+            Library:Notify("Not Shadow Banned — account is good", 4)
+        end
+    end,
+})
+
 local CreditsBox = Tabs.Misc:AddRightGroupbox("Credits", "heart")
 CreditsBox:AddLabel("AoT:R Freemium by 777KM", true)
 CreditsBox:AddLabel("UI: Obsidian by deividcomsono", true)
