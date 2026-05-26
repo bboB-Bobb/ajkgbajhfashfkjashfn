@@ -618,8 +618,19 @@ local lastKnownMoney   = nil
 -- walks PlayerGui from a likely starting point and returns a TextLabel/TextBox.
 -- The first one that resolves wins. Add the real path on top.
 local moneyPathCandidates = {
-    -- Primary: in-game HUD gold counter (top-of-screen panel). Confirmed via
-    -- Spy Money Path dump 2026-05-26.
+    -- Primary: Topbar currency display (persistent across lobby + mission).
+    -- Confirmed via Spy Lobby UI 2026-05-26.
+    function()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        local iface = pg and pg:FindFirstChild("Interface")
+        local top = iface and iface:FindFirstChild("Topbar")
+        local main = top and top:FindFirstChild("Main")
+        local cur = main and main:FindFirstChild("Currencies")
+        local gold = cur and cur:FindFirstChild("Gold")
+        return gold and gold:FindFirstChild("Amount")
+    end,
+    -- Fallback: in-mission HUD top panel (often 0 mid-mission, but kept
+    -- in case the topbar gets hidden in some game state).
     function()
         local pg = LocalPlayer:FindFirstChild("PlayerGui")
         local iface = pg and pg:FindFirstChild("Interface")
@@ -630,17 +641,33 @@ local moneyPathCandidates = {
         local gold = two and two:FindFirstChild("Gold")
         return gold and gold:FindFirstChild("Title")
     end,
-    -- Fallback: Injury shop also exposes a Gold label.
-    function()
-        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-        local iface = pg and pg:FindFirstChild("Interface")
-        local inj = iface and iface:FindFirstChild("Injury")
-        local main = inj and inj:FindFirstChild("Main")
-        local injs = main and main:FindFirstChild("Injuries")
-        local gold = injs and injs:FindFirstChild("Gold")
-        return gold and gold:FindFirstChild("Title")
-    end,
 }
+
+-- Gems mirror — same Topbar.Currencies path, sibling of Gold.
+local cachedGemsLabel = nil
+local lastKnownGems   = nil
+local function resolveGemsLabel()
+    if cachedGemsLabel and cachedGemsLabel.Parent then return cachedGemsLabel end
+    cachedGemsLabel = nil
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    local iface = pg and pg:FindFirstChild("Interface")
+    local top = iface and iface:FindFirstChild("Topbar")
+    local main = top and top:FindFirstChild("Main")
+    local cur = main and main:FindFirstChild("Currencies")
+    local gems = cur and cur:FindFirstChild("Gems")
+    cachedGemsLabel = gems and gems:FindFirstChild("Amount")
+    return cachedGemsLabel
+end
+
+local function getGems()
+    local lbl = resolveGemsLabel()
+    if not lbl then return lastKnownGems end
+    local cleaned = ((lbl.Text or ""):gsub("[^%d]", ""))
+    local n = tonumber(cleaned)
+    if n then lastKnownGems = n end
+    return lastKnownGems
+end
+LocalPlayer.CharacterAdded:Connect(function() cachedGemsLabel = nil end)
 
 local function resolveMoneyLabel()
     if cachedMoneyLabel and cachedMoneyLabel.Parent then return cachedMoneyLabel end
@@ -1369,6 +1396,10 @@ end
 sendMatchWebhook = function(matchNum)
     local data  = fetchRewardsRemote()
     local money = getMoney()
+    local gems  = getGems()
+    local level   = LocalPlayer:GetAttribute("Level")
+    local streak  = LocalPlayer:GetAttribute("Streak")
+    local title   = LocalPlayer:GetAttribute("Title")
 
     local win, fields
     if data then
@@ -1395,8 +1426,17 @@ sendMatchWebhook = function(matchNum)
             inline = true,
         }
         fields[#fields + 1] = {
-            name   = "Money (Gold)",
-            value  = money and tostring(money) or "?",
+            name   = "Player",
+            value  = string.format("Level: %s\nStreak: %s\n%s",
+                tostring(level or "?"), tostring(streak or "?"),
+                title and ("Title: " .. tostring(title)) or ""),
+            inline = true,
+        }
+        fields[#fields + 1] = {
+            name   = "Total",
+            value  = string.format("Gold: %s\nGems: %s",
+                money and tostring(money) or "?",
+                gems and tostring(gems) or "?"),
             inline = true,
         }
         fields[#fields + 1] = {
@@ -1443,14 +1483,18 @@ sendMatchWebhook = function(matchNum)
             }
         end
     else
-        -- Remote was nil — likely we polled outside the window the server
-        -- responds in. Send a minimal embed so the user still sees the match.
+        -- Remote was nil — likely the sniffer hasn't installed (executor
+        -- without getactors/run_on_actor). Send a minimal embed so the
+        -- user still sees the match.
         win = false
         fields = {
             { name = "Match", value = string.format("#%d", matchNum), inline = false },
-            { name = "Status", value = "S_Rewards/Get returned nil at match-end. " ..
-                "Check the AOTR.lua trigger timing.", inline = false },
-            { name = "Money (Gold)", value = money and tostring(money) or "?", inline = true },
+            { name = "Status", value = "S_Rewards capture missing — Actor sniffer may not be installed.", inline = false },
+            { name = "Player", value = string.format("Level: %s\nStreak: %s",
+                tostring(level or "?"), tostring(streak or "?")), inline = true },
+            { name = "Total", value = string.format("Gold: %s\nGems: %s",
+                money and tostring(money) or "?",
+                gems and tostring(gems) or "?"), inline = true },
         }
     end
 
