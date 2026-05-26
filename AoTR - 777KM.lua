@@ -1806,10 +1806,14 @@ task.spawn(function()
                 -- webhook. Gold/Gems no longer needs accumulation — the
                 -- Data/Copy poll (separate 30s loop) keeps the profile
                 -- cache fresh with the authoritative server value.
-                -- Compute duration from matchStartTick (set when Modifiers
-                -- went non-nil). Falls back to nil → embed shows "?" if
-                -- script loaded mid-match without seeing the start edge.
-                if matchStartTick then
+                -- Match duration: prefer workspace.Seconds (the game's own
+                -- mission timer — matches the in-game "TIME TAKEN" label
+                -- exactly). Falls back to tick()-diff if Seconds is missing
+                -- or already reset to 0.
+                local secAttr = Workspace:GetAttribute("Seconds")
+                if type(secAttr) == "number" and secAttr > 0 then
+                    lastMatchSeconds = math.floor(secAttr)
+                elseif matchStartTick then
                     lastMatchSeconds = math.floor(tick() - matchStartTick)
                 end
                 matchCount = matchCount + 1
