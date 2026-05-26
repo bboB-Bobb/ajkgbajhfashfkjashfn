@@ -1074,8 +1074,10 @@ local sniffHookSrc = ([[
             -- Dedup key: (service, action, result-type). Same call with same
             -- result-type fires only once across the whole session, but
             -- nil->table transitions (e.g. S_Rewards polling) fire on both.
-            local key = string.format("%s:%s:%s",
-                tostring(args[1]), tostring(args[2]), type(returnVal))
+            -- Use concatenation (NOT string.format) so the outer
+            -- :format(SNIFF_BRIDGE) on this whole source block doesn't try
+            -- to consume our %s placeholders.
+            local key = tostring(args[1]) .. ":" .. tostring(args[2]) .. ":" .. type(returnVal)
             if not seenCalls[key] then
                 seenCalls[key] = true
                 pcall(function()
