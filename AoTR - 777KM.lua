@@ -607,12 +607,27 @@ local lastKnownMoney   = nil
 -- walks PlayerGui from a likely starting point and returns a TextLabel/TextBox.
 -- The first one that resolves wins. Add the real path on top.
 local moneyPathCandidates = {
+    -- Primary: in-game HUD gold counter (top-of-screen panel). Confirmed via
+    -- Spy Money Path dump 2026-05-26.
     function()
         local pg = LocalPlayer:FindFirstChild("PlayerGui")
-        if not pg then return nil end
-        -- PLACEHOLDER — replace once "Spy Money Path" finds the real one.
-        -- e.g. return pg.Interface.Lobby.Currency.Amount
-        return nil
+        local iface = pg and pg:FindFirstChild("Interface")
+        local hud = iface and iface:FindFirstChild("HUD")
+        local main = hud and hud:FindFirstChild("Main")
+        local top = main and main:FindFirstChild("Top")
+        local two = top and top:FindFirstChild("2")
+        local gold = two and two:FindFirstChild("Gold")
+        return gold and gold:FindFirstChild("Title")
+    end,
+    -- Fallback: Injury shop also exposes a Gold label.
+    function()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        local iface = pg and pg:FindFirstChild("Interface")
+        local inj = iface and iface:FindFirstChild("Injury")
+        local main = inj and inj:FindFirstChild("Main")
+        local injs = main and main:FindFirstChild("Injuries")
+        local gold = injs and injs:FindFirstChild("Gold")
+        return gold and gold:FindFirstChild("Title")
     end,
 }
 
@@ -1143,58 +1158,91 @@ end)
 
 --------- Match-end webhook (edge-triggered on Rewards.Visible) ---------
 -- Independent of AutoRetry: webhook fires on every match end whether or
--- not AutoRetry is enabled. Detects Win vs Loss by scanning the Rewards
--- subtree for a TextLabel containing "MISSION COMPLETED" (case-insensitive
--- match for safety). Dumps every readable TextLabel into the embed so the
--- user gets stats + obtained rewards without us having to hardcode each
--- nested path — we can refine the layout once the dump shows what's there.
+-- not AutoRetry is enabled. Win vs Loss is detected by scanning the
+-- Rewards subtree for "MISSION COMPLETED" (case-insensitive substring).
+-- S_Rewards/Get returns nil for both args, so the embed is built entirely
+-- from the Rewards UI subtree (paths confirmed via Spy Money Path dump):
+--   Rewards.Main.Info.Main.Stats.{Damage,Kills,Crits,Time}.Amount
+--   Rewards.Main.Info.Main.Items.<row>_<col>.Main.Inner.Quantity
 
-local function gatherRewardsText()
-    local r = getRewardsFrame()
-    if not r then return {}, false end
-    local lines = {}
-    local win   = false
+-- Index 1 of Items = currency row (EXP / Gold / ?? / Crystal / ...).
+-- Index 2 of Items = gear row (5 grey-tier item slots).
+local ITEM_LABELS = {
+    ["1_1"] = "EXP",
+    ["1_2"] = "Gold",
+    ["1_3"] = "Slot 1_3",
+    ["1_4"] = "Crystal",
+    ["1_5"] = "Slot 1_5",
+    ["2_1"] = "Item 1",
+    ["2_2"] = "Item 2",
+    ["2_3"] = "Item 3",
+    ["2_4"] = "Item 4",
+    ["2_5"] = "Item 5",
+}
+
+local function readText(inst)
+    if not inst then return nil end
+    local ok, t = pcall(function() return inst.Text end)
+    if not ok or t == nil or t == "" then return nil end
+    return t
+end
+
+local function getRewardsInfoMain()
+    local r = getRewardsFrame(); if not r then return nil end
+    local main = r:FindFirstChild("Main"); if not main then return nil end
+    local info = main:FindFirstChild("Info"); if not info then return nil end
+    return info:FindFirstChild("Main")
+end
+
+local function detectWin()
+    local r = getRewardsFrame(); if not r then return false end
     for _, d in ipairs(r:GetDescendants()) do
-        if (d:IsA("TextLabel") or d:IsA("TextBox")) then
+        if d:IsA("TextLabel") or d:IsA("TextBox") then
             local t = d.Text
-            if t and t ~= "" then
-                lines[#lines + 1] = t
-                if string.find(string.upper(t), "MISSION COMPLETED", 1, true) then
-                    win = true
-                end
+            if t and string.find(string.upper(t), "MISSION COMPLETED", 1, true) then
+                return true
             end
         end
     end
-    return lines, win
+    return false
 end
 
-local function fetchRemoteRewards()
-    local GET = getGET()
-    if not GET then return nil end
-    local ok, result = pcall(GET.InvokeServer, GET, "S_Rewards", "Get", true)
-    if ok and type(result) == "table" then return result end
-    return nil
+local function readStat(infoMain, name)
+    local stats = infoMain and infoMain:FindFirstChild("Stats")
+    local row   = stats and stats:FindFirstChild(name)
+    local amt   = row and row:FindFirstChild("Amount")
+    return readText(amt)
 end
 
-local function summarizeRemote(tbl)
-    if type(tbl) ~= "table" then return nil end
-    local parts = {}
-    for k, v in pairs(tbl) do
-        if type(v) == "table" then
-            parts[#parts + 1] = string.format("%s: <table>", tostring(k))
-        else
-            parts[#parts + 1] = string.format("%s: %s", tostring(k), tostring(v))
-        end
-    end
-    if #parts == 0 then return nil end
-    return table.concat(parts, "\n")
+local function readItem(infoMain, key)
+    local items = infoMain and infoMain:FindFirstChild("Items")
+    local slot  = items and items:FindFirstChild(key)
+    local main  = slot and slot:FindFirstChild("Main")
+    local inner = main and main:FindFirstChild("Inner")
+    local qty   = inner and inner:FindFirstChild("Quantity")
+    return readText(qty)
 end
 
 sendMatchWebhook = function(matchNum)
-    local lines, win = gatherRewardsText()
-    local money = getMoney()
-    local remote = fetchRemoteRewards()
-    local remoteText = summarizeRemote(remote)
+    local infoMain = getRewardsInfoMain()
+    local win      = detectWin()
+    local money    = getMoney()
+
+    local stats = {
+        Time   = readStat(infoMain, "Time"),
+        Damage = readStat(infoMain, "Damage"),
+        Kills  = readStat(infoMain, "Kills"),
+        Crits  = readStat(infoMain, "Crits"),
+    }
+
+    local obtainedLines = {}
+    for key, label in pairs(ITEM_LABELS) do
+        local v = readItem(infoMain, key)
+        if v then
+            obtainedLines[#obtainedLines + 1] = string.format("%s: %s", label, v)
+        end
+    end
+    table.sort(obtainedLines)  -- deterministic order
 
     local fields = {}
     fields[#fields + 1] = {
@@ -1203,24 +1251,25 @@ sendMatchWebhook = function(matchNum)
         inline = false,
     }
     fields[#fields + 1] = {
-        name   = "Money",
+        name   = "Money (Gold)",
         value  = money and tostring(money) or "?",
         inline = true,
     }
-    if #lines > 0 then
-        local joined = table.concat(lines, "\n")
-        if #joined > 1000 then joined = string.sub(joined, 1, 1000) .. "..." end
+    fields[#fields + 1] = {
+        name   = "Stats",
+        value  = string.format(
+            "Time: %s\nDamage: %s\nKills: %s\nCrits: %s",
+            stats.Time   or "?",
+            stats.Damage or "?",
+            stats.Kills  or "?",
+            stats.Crits  or "?"
+        ),
+        inline = false,
+    }
+    if #obtainedLines > 0 then
         fields[#fields + 1] = {
-            name   = "Rewards Screen",
-            value  = "```\n" .. joined .. "\n```",
-            inline = false,
-        }
-    end
-    if remoteText then
-        if #remoteText > 1000 then remoteText = string.sub(remoteText, 1, 1000) .. "..." end
-        fields[#fields + 1] = {
-            name   = "S_Rewards/Get",
-            value  = "```\n" .. remoteText .. "\n```",
+            name   = "Obtained",
+            value  = table.concat(obtainedLines, "\n"),
             inline = false,
         }
     end
