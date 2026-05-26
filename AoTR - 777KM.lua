@@ -1849,20 +1849,28 @@ task.spawn(function()
                 bumpGamesPlayed()  -- persistent total (saved to file)
                 local n = matchCount
                 task.spawn(function()
-                    -- Wait for sniffer capture (up to 6s after match end)
-                    local waited = 0
-                    while waited < 6 do
-                        if latestRewardsCapture
-                           and type(latestRewardsCapture.data) == "table" then
-                            break
+                    -- Only wait for sniffer capture if the sniffer is on.
+                    -- When off, fetchRewardsRemote() actively probes
+                    -- S_Rewards/Get/Last as fallback — no need to wait.
+                    if SNIFFER_ENABLED then
+                        local waited = 0
+                        while waited < 6 do
+                            if latestRewardsCapture
+                               and type(latestRewardsCapture.data) == "table" then
+                                break
+                            end
+                            task.wait(0.25)
+                            waited = waited + 0.25
                         end
-                        task.wait(0.25)
-                        waited = waited + 0.25
                     end
 
-                    -- Trigger a fresh Data/Copy poll so the embed shows
-                    -- post-match Gold/Gems (server saves after Rewards).
-                    do
+                    -- Fire Data/Copy IN PARALLEL with the webhook send so
+                    -- both network round-trips overlap. sendMatchWebhook
+                    -- does its own S_Rewards/Get/Last fetch internally,
+                    -- and the latestPlayerData cache may be slightly
+                    -- behind (last 30s background poll) but the webhook
+                    -- still reads it via getGold/getGems.
+                    task.spawn(function()
                         local assets  = RS:FindFirstChild("Assets")
                         local remotes = assets and assets:FindFirstChild("Remotes")
                         local GET     = remotes and remotes:FindFirstChild("GET")
@@ -1872,7 +1880,7 @@ task.spawn(function()
                                 latestPlayerData = { ts = tick(), data = result }
                             end
                         end
-                    end
+                    end)
 
                     if Toggles.WebhookEnabled and Toggles.WebhookEnabled.Value then
                         sendMatchWebhook(n)
@@ -1887,7 +1895,7 @@ task.spawn(function()
             end
         end
         lastRewardsVisible = v
-        task.wait(0.3)
+        task.wait(0.15)  -- tighter poll = snappier webhook trigger
     end
 end)
 
