@@ -896,6 +896,107 @@ local function getGET()
     return remotes and remotes:FindFirstChild("GET")
 end
 
+--------- Path A: S_Rewards Actor-side passive sniffer ---------
+-- Our main-thread GET("S_Rewards","Get",...) calls come back nil. The game's
+-- own client script fires the same remote and presumably gets real data.
+-- We can't change that from the main thread — but we CAN inject a hook into
+-- each gameplay Actor that intercepts the actor's S_Rewards InvokeServer
+-- calls, captures the return value, and bridges it to the main thread for
+-- logging. Same per-actor injection pattern AOTR Spy.lua uses for namecall.
+local SNIFF_BRIDGE = "AOTR_RewardsSniffer_777KM"
+do
+    local CoreGui = game:GetService("CoreGui")
+    local existing = CoreGui:FindFirstChild(SNIFF_BRIDGE)
+    if existing then existing:Destroy() end
+    local b = Instance.new("BindableEvent")
+    b.Name   = SNIFF_BRIDGE
+    b.Parent = CoreGui
+    b.Event:Connect(function(data)
+        if type(data) ~= "table" then return end
+        print(string.format("[Sniff S_Rewards] action=%s arg3=%s returnType=%s",
+            tostring(data.action), tostring(data.arg3), type(data.result)))
+        if type(data.result) == "table" then
+            for k, v in pairs(data.result) do
+                print("   ", tostring(k), "=", tostring(v))
+                if type(v) == "table" then
+                    for k2, v2 in pairs(v) do
+                        print("       ", tostring(k2), "=", tostring(v2))
+                    end
+                end
+            end
+        else
+            print("   value =", tostring(data.result))
+        end
+    end)
+end
+
+local sniffHookSrc = ([[
+    local CoreGui = game:GetService("CoreGui")
+    local bridge  = CoreGui:WaitForChild(%q, 10)
+    if not bridge then return end
+
+    local RS  = game:GetService("ReplicatedStorage")
+    local GET = RS:WaitForChild("Assets"):WaitForChild("Remotes"):WaitForChild("GET")
+
+    local SETID = setthreadidentity or setidentity
+    local GETID = getthreadidentity or getidentity
+
+    local old
+    local hookFn = function(self, ...)
+        local args = { ... }
+        local function callOrig()
+            if SETID then
+                local saved = GETID and GETID() or nil
+                pcall(SETID, 8)
+                local packed = table.pack(pcall(old, self, ...))
+                if saved then pcall(SETID, saved) end
+                if packed[1] then return table.unpack(packed, 2, packed.n) end
+                error(packed[2], 2)
+            end
+            return old(self, ...)
+        end
+
+        if self == GET then
+            local okC, isExecutor = pcall(checkcaller)
+            local okM, m = pcall(getnamecallmethod)
+            if okC and not isExecutor and okM and m == "InvokeServer" and args[1] == "S_Rewards" then
+                local result = callOrig()
+                pcall(function()
+                    bridge:Fire({
+                        service = args[1],
+                        action  = args[2],
+                        arg3    = args[3],
+                        result  = result,
+                    })
+                end)
+                return result
+            end
+        end
+        return callOrig()
+    end
+    old = hookmetamethod(game, "__namecall", newcclosure(hookFn))
+]]):format(SNIFF_BRIDGE)
+
+local function injectSniffer()
+    if not (getactors and run_on_actor) then return end
+    local ok, actors = pcall(getactors)
+    if not ok or type(actors) ~= "table" then return end
+    for _, actor in ipairs(actors) do
+        pcall(run_on_actor, actor, sniffHookSrc)
+    end
+end
+injectSniffer()
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    injectSniffer()
+end)
+game.DescendantAdded:Connect(function(d)
+    if d:IsA("Actor") and run_on_actor then
+        task.wait(0.3)
+        pcall(run_on_actor, d, sniffHookSrc)
+    end
+end)
+
 --------- Utility: shared UI paths ---------
 -- All paths are inside PlayerGui.Interface; resolved each time because the
 -- HUD instance can be rebuilt on respawn / mission start.
@@ -1306,21 +1407,42 @@ task.spawn(function()
 end)
 
 --------- Debug helpers (one-shot discovery) ---------
+-- Path B: try every plausible arg shape against S_Rewards. If any variant
+-- returns a non-nil value, we've found the calling convention the game
+-- itself uses. Pair with the Actor sniffer (Path A) installed above —
+-- the sniffer logs whatever the game's own call gets back, so we can
+-- compare against our variants.
 UtilBox:AddButton({
     Text = "Dump S_Rewards",
     Func = function()
         local GET = getGET()
         if not GET then warn("[Dump] no GET remote") return end
-        local ok1, r1 = pcall(GET.InvokeServer, GET, "S_Rewards", "Get", true)
-        print("[S_Rewards true ] ok=", ok1, " result=", r1)
-        if type(r1) == "table" then
-            for k, v in pairs(r1) do print("   ", k, "=", v) end
+
+        local function try(label, ...)
+            local ok, r = pcall(GET.InvokeServer, GET, ...)
+            print(string.format("[S_Rewards %-14s] ok=%s type=%s value=%s",
+                label, tostring(ok), type(r), tostring(r)))
+            if type(r) == "table" then
+                for k, v in pairs(r) do
+                    print("   ", tostring(k), "=", tostring(v))
+                end
+            end
         end
-        local ok2, r2 = pcall(GET.InvokeServer, GET, "S_Rewards", "Get", false)
-        print("[S_Rewards false] ok=", ok2, " result=", r2)
-        if type(r2) == "table" then
-            for k, v in pairs(r2) do print("   ", k, "=", v) end
-        end
+
+        try("Get true",      "S_Rewards", "Get", true)
+        try("Get false",     "S_Rewards", "Get", false)
+        try("Get nil",       "S_Rewards", "Get")
+        try("Get plr",       "S_Rewards", "Get", LocalPlayer)
+        try("Get name",      "S_Rewards", "Get", LocalPlayer.Name)
+        try("Get Last",      "S_Rewards", "Get", "Last")
+        try("Get Current",   "S_Rewards", "Get", "Current")
+        try("Get Match",     "S_Rewards", "Get", "Match")
+        try("Get All",       "S_Rewards", "Get", "All")
+        try("Last",          "S_Rewards", "Last")
+        try("Current",       "S_Rewards", "Current")
+        try("Fetch",         "S_Rewards", "Fetch")
+        try("Claim",         "S_Rewards", "Claim")
+
         Library:Notify("S_Rewards dump in console", 3)
     end,
 })
