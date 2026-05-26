@@ -998,18 +998,24 @@ do
     end
     b.Event:Connect(function(data)
         if type(data) ~= "table" then return end
-        print(string.format("[Sniff S_Rewards] action=%s arg3=%s returnType=%s",
-            tostring(data.action), tostring(data.arg3), type(data.result)))
+        -- S_Rewards always feeds the cache used by the webhook.
+        if data.service == "S_Rewards" then
+            print(string.format("[Sniff S_Rewards] action=%s arg3=%s returnType=%s",
+                tostring(data.action), tostring(data.arg3), type(data.result)))
+            if type(data.result) == "table" then
+                deepPrint(data.result)
+                latestRewardsCapture = { ts = tick(), data = data.result }
+            else
+                print("   value =", tostring(data.result))
+            end
+            return
+        end
+        -- Every other unique GET (deduped at actor side) — discovery log.
+        print(string.format("[SNIFF GET] %s/%s -> type=%s value=%s",
+            tostring(data.service), tostring(data.action),
+            type(data.result), tostring(data.result)))
         if type(data.result) == "table" then
             deepPrint(data.result)
-            -- Cache the latest non-nil capture for the webhook so we don't
-            -- have to race the game's own polling loop. The game drains the
-            -- data on its first successful Get; subsequent main-thread calls
-            -- (ours) get nil. By listening passively we always have the real
-            -- table without firing anything ourselves.
-            latestRewardsCapture = { ts = tick(), data = data.result }
-        else
-            print("   value =", tostring(data.result))
         end
     end)
 end
@@ -1025,6 +1031,11 @@ local sniffHookSrc = ([[
     local SETID = setthreadidentity or setidentity
     local GETID = getthreadidentity or getidentity
 
+    -- Actor-side dedup so we don't flood the bridge with high-frequency
+    -- repeated calls. Key includes the result type so a nil->table flip
+    -- (the S_Rewards polling pattern) still fires both edges.
+    local seenCalls = {}
+
     local old
     local hookFn = function(self, ...)
         -- pack everything once so we can reuse below without `...` leaking
@@ -1035,7 +1046,9 @@ local sniffHookSrc = ([[
         if self == GET then
             local okC, isExecutor = pcall(checkcaller)
             local okM, m = pcall(getnamecallmethod)
-            if okC and not isExecutor and okM and m == "InvokeServer" and args[1] == "S_Rewards" then
+            -- Capture EVERY game-initiated InvokeServer (broad discovery),
+            -- not just S_Rewards. Dedup happens after we have the result.
+            if okC and not isExecutor and okM and m == "InvokeServer" then
                 interesting = true
             end
         end
@@ -1058,14 +1071,33 @@ local sniffHookSrc = ([[
 
         if interesting then
             local returnVal = results[2]
-            pcall(function()
-                bridge:Fire({
-                    service = args[1],
-                    action  = args[2],
-                    arg3    = args[3],
-                    result  = returnVal,
-                })
-            end)
+            -- Dedup key: (service, action, result-type). Same call with same
+            -- result-type fires only once across the whole session, but
+            -- nil->table transitions (e.g. S_Rewards polling) fire on both.
+            local key = string.format("%s:%s:%s",
+                tostring(args[1]), tostring(args[2]), type(returnVal))
+            if not seenCalls[key] then
+                seenCalls[key] = true
+                pcall(function()
+                    bridge:Fire({
+                        service = args[1],
+                        action  = args[2],
+                        arg3    = args[3],
+                        result  = returnVal,
+                    })
+                end)
+            elseif args[1] == "S_Rewards" then
+                -- Always forward S_Rewards so the webhook gets every
+                -- post-match capture (per-match, not just once per session).
+                pcall(function()
+                    bridge:Fire({
+                        service = args[1],
+                        action  = args[2],
+                        arg3    = args[3],
+                        result  = returnVal,
+                    })
+                end)
+            end
         end
 
         return table.unpack(results, 2, results.n)
@@ -1641,6 +1673,21 @@ UtilBox:AddButton({
             end
         end
         Library:Notify(string.format("Spy: %d candidate labels in console", count), 4)
+    end,
+})
+
+UtilBox:AddButton({
+    Text = "Dump Remotes Folder",
+    Func = function()
+        local assets = RS:FindFirstChild("Assets")
+        local remotes = assets and assets:FindFirstChild("Remotes")
+        if not remotes then warn("[Remotes] folder not found") return end
+        print("\n========== REMOTES FOLDER ==========\n")
+        for _, c in ipairs(remotes:GetChildren()) do
+            print(string.format("  %s: %s", c.ClassName, c.Name))
+        end
+        print("\n========== END ==========\n")
+        Library:Notify("Remotes folder dumped to console", 3)
     end,
 })
 
