@@ -652,11 +652,18 @@ local currentTarget = nil
 -- before the refill remote was accepted).
 local refillingNow = false
 
+-- Set true while the Rewards frame is visible (mission end / death). All the
+-- gameplay loops (AutoKill, AutoReload, AutoRefill, AutoEscape) check this
+-- and bail so their remote spam doesn't race the AutoRetry click + remote
+-- and get them server-dropped. Cleared when Rewards goes invisible.
+local mutedForRetry = false
+
 -- Hover loop: runs on Heartbeat (every frame) so gravity never gets a chance
 -- to pull you down between AutoKill ticks. Also zeroes velocity so a titan
 -- swat can't fling you out of position.
 RunService.Heartbeat:Connect(function()
     if not Toggles.AutoKill.Value then return end
+    if mutedForRetry then return end
     if not Toggles.TPAboveTitan.Value then return end
     if not currentTarget or not currentTarget.Parent then return end
     local nape = getTitanNape(currentTarget); if not nape then return end
@@ -668,7 +675,7 @@ end)
 
 task.spawn(function()
     while not Library.Unloaded do
-        if Toggles.AutoKill.Value then
+        if Toggles.AutoKill.Value and not mutedForRetry then
             -- Drop target the moment its Humanoid is gone (game removes it
             -- on kill) or its nape is missing. Otherwise stay sticky.
             if currentTarget and (isTitanDead(currentTarget) or not getTitanNape(currentTarget)) then
@@ -807,7 +814,7 @@ LocalPlayer.CharacterAdded:Connect(function() cachedRefill = nil end)
 local autoReloadCooldown = 0
 task.spawn(function()
     while not Library.Unloaded do
-        if Toggles.AutoReload.Value and not refillingNow then
+        if Toggles.AutoReload.Value and not refillingNow and not mutedForRetry then
             local g = getBladeGradient()
             if g and tick() > autoReloadCooldown then
                 local x = g.Offset and g.Offset.X or 1
@@ -881,7 +888,7 @@ end
 
 task.spawn(function()
     while not Library.Unloaded do
-        if Toggles.AutoRefill.Value and not refillingNow and tick() > autoRefillCooldown then
+        if Toggles.AutoRefill.Value and not refillingNow and not mutedForRetry and tick() > autoRefillCooldown then
             local current = readSetsCount()
             local setsEmpty = current == 0
             local durEmpty  = bladeRatio() < EMPTY_BELOW
@@ -911,6 +918,7 @@ local function rebindEscape()
     if not frame then return end
     escapeConn = frame.ChildAdded:Connect(function(child)
         if not Toggles.AutoEscape.Value then return end
+        if mutedForRetry then return end
         local POST = getPOST()
         if POST then
             pcall(function() POST:FireServer("Attacks", "Slash_Escape") end)
@@ -967,12 +975,26 @@ end
 
 -- 5s cooldown on first execution so the script doesn't auto-retry the
 -- instant it loads (e.g., if a Rewards frame is already visible).
+-- When Rewards is visible we raise `mutedForRetry` so AutoKill / AutoReload
+-- / AutoRefill / AutoEscape all bail for a tick — their concurrent remote
+-- spam was racing the Retry click + remote and getting it server-dropped.
+-- Flag clears the instant Rewards goes invisible (success) or AutoRetry
+-- is toggled off, so the gameplay loops resume immediately.
 local autoRetryCooldown = tick() + 5
 task.spawn(function()
     while not Library.Unloaded do
-        if Toggles.AutoRetry.Value and tick() > autoRetryCooldown then
-            local r = getRewardsFrame()
-            if r and r.Visible then
+        local r       = getRewardsFrame()
+        local visible = r and r.Visible
+
+        if Toggles.AutoRetry.Value and visible then
+            if not mutedForRetry then
+                mutedForRetry = true
+                -- One tick for the gameplay loops to notice and bail out
+                -- before we click — otherwise an in-flight Slash can still
+                -- be queued the instant the Rewards frame appears.
+                task.wait(0.4)
+            end
+            if tick() > autoRetryCooldown then
                 -- 2s cooldown so we re-fire if the first click/remote
                 -- silently failed; the Rewards frame turning invisible
                 -- naturally stops the loop on success.
@@ -985,6 +1007,8 @@ task.spawn(function()
                     pcall(function() GET:InvokeServer("Functions", "Retry", "Add") end)
                 end
             end
+        else
+            if mutedForRetry then mutedForRetry = false end
         end
         task.wait(0.3)
     end
