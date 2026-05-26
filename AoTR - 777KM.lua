@@ -66,6 +66,13 @@ local postWebhook
 local sendMatchWebhook
 local getGold
 
+-- Forward-declared so sendMatchWebhook (assigned further down) closes
+-- over the SAME locals that the Rewards.Visible watcher writes to.
+-- Without these, Lua resolves them to globals = always nil = "?" in embed.
+local lastMatchSeconds
+local matchStartTick
+local lastInMatch
+
 -- Cache of the most recent S_Rewards table the Actor sniffer captured from
 -- the game's own polling. Read by sendMatchWebhook (so we don't have to
 -- fire the remote ourselves and lose the race). Written by the bridge
@@ -1741,13 +1748,9 @@ end
 -- Match duration tracking. tick()-based diff is the only timing source we
 -- trust — S_Rewards.Seconds is always 0 (server quirk), and workspace.Seconds
 -- resets to 0 before our Rewards.Visible edge fires, so its final value is
--- already lost by the time we sample.
-local lastMatchSeconds = nil
-local matchStartTick   = nil
--- Polled state so we can detect nil->non-nil Modifiers transitions in the
--- main Rewards watcher loop (signal-based detection is unreliable on some
--- executors when the attribute appears from nil for the first time).
-local lastInMatch      = isInMatch()
+-- already lost by the time we sample. Vars are forward-declared at top of
+-- file so sendMatchWebhook (assigned earlier) closes over the same locals.
+lastInMatch = isInMatch()
 
 -- Seed start tick if the script loaded while already in a match.
 if lastInMatch then matchStartTick = tick() end
