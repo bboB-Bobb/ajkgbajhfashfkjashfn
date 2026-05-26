@@ -1613,10 +1613,11 @@ sendMatchWebhook = function(matchNum)
         }
         fields[#fields + 1] = {
             name   = "Time",
-            -- data.Seconds is always 0 in S_Rewards (server quirk). Prefer
-            -- lastMatchSeconds, which is read from workspace.Seconds at the
-            -- exact moment Rewards.Visible flipped true.
-            value  = fmtSeconds(lastMatchSeconds or data.Seconds),
+            -- data.Seconds is always 0 in S_Rewards (server quirk) — don't
+            -- fall back to it. lastMatchSeconds is tick()-based from the
+            -- Modifiers attribute transition; nil if we missed the start
+            -- edge (script loaded mid-match), in which case show "?".
+            value  = fmtSeconds(lastMatchSeconds),
             inline = true,
         }
         fields[#fields + 1] = {
@@ -1707,19 +1708,33 @@ end
 
 local matchCount         = 0
 local lastRewardsVisible = false
--- The server returns Seconds=0 inside S_Rewards (useless). The game's own
--- elapsed-seconds counter is workspace.Seconds, but it RESETS to 0 between
--- missions — so reading it at the match-end edge often returns 0 because
--- the reset already happened. Solution: track the peak value continuously
--- via the attribute-changed signal, and snapshot it when Rewards appears.
-local lastMatchSeconds   = nil
-local missionPeakSeconds = 0
 
-Workspace:GetAttributeChangedSignal("Seconds"):Connect(function()
-    local s = Workspace:GetAttribute("Seconds")
-    if type(s) == "number" and s > missionPeakSeconds then
-        missionPeakSeconds = s
+-- ===== In-match detection via workspace.Modifiers attribute =====
+-- The game sets a "Modifiers" attribute on Workspace only while the
+-- player is in an active mission. Lobby = nil; in-match = non-nil (often
+-- an empty table when no special modifiers are active). Reliable across
+-- both win and death since both end the mission and clear the attribute.
+local function isInMatch()
+    return Workspace:GetAttribute("Modifiers") ~= nil
+end
+
+-- Match duration tracking. tick()-based diff is the only timing source we
+-- trust — S_Rewards.Seconds is always 0 (server quirk), and workspace.Seconds
+-- resets to 0 before our Rewards.Visible edge fires, so its final value is
+-- already lost by the time we sample.
+local lastMatchSeconds = nil
+local matchStartTick   = nil
+
+-- Seed start tick if the script loaded while already in a match.
+if isInMatch() then matchStartTick = tick() end
+
+Workspace:GetAttributeChangedSignal("Modifiers"):Connect(function()
+    if isInMatch() then
+        -- Just transitioned into a match
+        matchStartTick = tick()
     end
+    -- (no-else: match-end timestamp is captured in the Rewards.Visible
+    -- watcher below — Modifiers may clear slightly before/after that edge)
 end)
 task.spawn(function()
     while not Library.Unloaded do
@@ -1732,17 +1747,11 @@ task.spawn(function()
                 -- webhook. Gold/Gems no longer needs accumulation — the
                 -- Data/Copy poll (separate 30s loop) keeps the profile
                 -- cache fresh with the authoritative server value.
-                -- Use the peak workspace.Seconds value seen during the
-                -- mission (the attribute may have already reset to 0 by
-                -- the time we sample). Fallback to live value if peak is
-                -- still 0 (e.g. script loaded mid-match-end).
-                if missionPeakSeconds > 0 then
-                    lastMatchSeconds = missionPeakSeconds
-                else
-                    local live = Workspace:GetAttribute("Seconds")
-                    if type(live) == "number" and live > 0 then
-                        lastMatchSeconds = live
-                    end
+                -- Compute duration from matchStartTick (set when Modifiers
+                -- went non-nil). Falls back to nil → embed shows "?" if
+                -- script loaded mid-match without seeing the start edge.
+                if matchStartTick then
+                    lastMatchSeconds = math.floor(tick() - matchStartTick)
                 end
                 matchCount = matchCount + 1
                 local n = matchCount
@@ -1778,10 +1787,10 @@ task.spawn(function()
                 end)
             else
                 -- Rewards screen closed (new mission starting) — drop the
-                -- cache so next match's webhook can't accidentally reuse it,
-                -- and reset the peak timer so it tracks only THIS mission.
+                -- cache so next match's webhook can't accidentally reuse it.
+                -- matchStartTick is updated by the Modifiers attribute
+                -- listener when the next mission actually begins.
                 latestRewardsCapture = nil
-                missionPeakSeconds = 0
             end
         end
         lastRewardsVisible = v
