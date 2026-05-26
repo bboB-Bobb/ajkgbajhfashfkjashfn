@@ -1305,20 +1305,18 @@ end)
 -- "Get All" returns identical data. "Get true/false/nil/plr/name/Last/Current"
 -- all return nil for us — server appears to whitelist specific action strings.
 
--- Returns the latest S_Rewards table captured by the Actor sniffer if it's
--- fresh enough to belong to the current match. Falls back to non-consuming
--- active variants if the sniffer hasn't caught anything yet. NEVER fires
--- `("Get", true)` ourselves — that's what the game polls; calling it racing
--- the game would either lose (we get nil) or worse, drain the buffer before
--- the game does (game UI then shows blank rewards).
-local function fetchRewardsRemote(matchEdgeTime)
-    -- 1) Prefer the sniffer capture if it's after the match-end edge.
-    if latestRewardsCapture
-       and latestRewardsCapture.ts >= (matchEdgeTime or 0)
-       and type(latestRewardsCapture.data) == "table" then
+-- Returns the latest S_Rewards table captured by the Actor sniffer. Cache
+-- lifecycle is tied to the match: cleared when Rewards.Visible flips off
+-- (new match starting), so a non-nil entry always belongs to the current
+-- match. NEVER fires `("Get", true)` ourselves — that's what the game
+-- polls; calling it would either lose the race (we get nil) or worse,
+-- drain the buffer before the game does, blanking the in-game Rewards UI.
+local function fetchRewardsRemote()
+    if latestRewardsCapture and type(latestRewardsCapture.data) == "table" then
         return latestRewardsCapture.data
     end
-    -- 2) Last-resort active fallback. Skip arg3=true (the game's slot).
+    -- Last-resort active fallback if the sniffer didn't fire (e.g., executor
+    -- without getactors/run_on_actor). Skip arg3=true (the game's slot).
     local GET = getGET(); if not GET then return nil end
     for _, arg in ipairs({ LocalPlayer, "Last", "Match", "All" }) do
         local ok, r = pcall(GET.InvokeServer, GET, "S_Rewards", "Get", arg)
@@ -1334,8 +1332,8 @@ local function fmtSeconds(s)
     return string.format("%02d:%02d", m, r)
 end
 
-sendMatchWebhook = function(matchNum, edgeTime)
-    local data  = fetchRewardsRemote(edgeTime)
+sendMatchWebhook = function(matchNum)
+    local data  = fetchRewardsRemote()
     local money = getMoney()
 
     local win, fields
@@ -1437,31 +1435,33 @@ task.spawn(function()
     while not Library.Unloaded do
         local r = getRewardsFrame()
         local v = (r and r.Visible) or false
-        if v and not lastRewardsVisible then
-            -- Edge: match just ended (works for both win and death).
-            -- The game polls S_Rewards/Get for ~3 seconds before the server
-            -- has data ready. Stamp the edge time and let sendMatchWebhook
-            -- decide which sniffer capture is fresh enough.
-            local edgeTime = tick()
-            matchCount = matchCount + 1
-            if Toggles.WebhookEnabled and Toggles.WebhookEnabled.Value then
-                local n = matchCount
-                task.spawn(function()
-                    -- Wait up to 6s for the sniffer to receive a post-edge
-                    -- capture from the game's own polling. Bail early as
-                    -- soon as we have one.
-                    local waited = 0
-                    while waited < 6 do
-                        if latestRewardsCapture
-                           and latestRewardsCapture.ts >= edgeTime
-                           and type(latestRewardsCapture.data) == "table" then
-                            break
+        if v ~= lastRewardsVisible then
+            if v then
+                -- Match just ended (Rewards visible — works for win + death).
+                -- The game might already have polled S_Rewards before this
+                -- flip (server has data ready before the UI fades in), so
+                -- the cache could be populated already. Otherwise wait a
+                -- few ticks for it to arrive.
+                matchCount = matchCount + 1
+                if Toggles.WebhookEnabled and Toggles.WebhookEnabled.Value then
+                    local n = matchCount
+                    task.spawn(function()
+                        local waited = 0
+                        while waited < 6 do
+                            if latestRewardsCapture
+                               and type(latestRewardsCapture.data) == "table" then
+                                break
+                            end
+                            task.wait(0.25)
+                            waited = waited + 0.25
                         end
-                        task.wait(0.25)
-                        waited = waited + 0.25
-                    end
-                    sendMatchWebhook(n, edgeTime)
-                end)
+                        sendMatchWebhook(n)
+                    end)
+                end
+            else
+                -- Rewards screen closed (new mission starting) — drop the
+                -- cache so next match's webhook can't accidentally reuse it.
+                latestRewardsCapture = nil
             end
         end
         lastRewardsVisible = v
@@ -1599,23 +1599,73 @@ UtilBox:AddButton({
         end
 
         -- 4) ReplicatedStorage scan for Perk / Item rarity LUT modules
-        print("\n[RS Modules — perk/rarity/item candidates]")
-        local foundMods = 0
+        print("\n[RS Modules — perk/rarity/item/profile candidates]")
+        local moduleCandidates = {}
         for _, d in ipairs(RS:GetDescendants()) do
             local n = d.Name:lower()
             if d:IsA("ModuleScript") and
-               (n:find("perk") or n:find("rarity") or n:find("item") or n:find("currenc")) then
+               (n:find("perk") or n:find("rarity") or n:find("item")
+                or n:find("currenc") or n:find("profile") or n:find("data")
+                or n:find("save") or n:find("player") or n:find("stat")
+                or n:find("gold") or n:find("gem")) then
                 print("  ", d:GetFullName())
-                foundMods = foundMods + 1
+                moduleCandidates[#moduleCandidates + 1] = d
             end
         end
-        if foundMods == 0 then print("  (no matches)") end
+        if #moduleCandidates == 0 then print("  (no matches)") end
 
-        -- 5) ReplicatedStorage.Assets top-level (find Perks / Items folders)
+        -- 5) Try require()ing each candidate module and dump top-level keys
+        print("\n[Module Requires — top-level keys]")
+        for _, mod in ipairs(moduleCandidates) do
+            local ok, val = pcall(require, mod)
+            if ok and type(val) == "table" then
+                local keyCount, sample = 0, {}
+                for k, v in pairs(val) do
+                    keyCount = keyCount + 1
+                    if keyCount <= 12 then
+                        local vs = type(v) == "table" and "<table>" or tostring(v)
+                        sample[#sample + 1] = string.format("%s=%s", tostring(k), vs)
+                    end
+                end
+                print(string.format("  %s -> table, %d keys: %s",
+                    mod.Name, keyCount, table.concat(sample, ", ")))
+            elseif ok then
+                print(string.format("  %s -> %s = %s", mod.Name, type(val), tostring(val)))
+            else
+                print(string.format("  %s -> require ERR: %s", mod.Name, tostring(val)))
+            end
+        end
+
+        -- 6) ReplicatedStorage.Assets top-level (find Perks / Items folders)
         local assets = RS:FindFirstChild("Assets")
         if assets then
             print("\n[RS.Assets top-level]")
             for _, c in ipairs(assets:GetChildren()) do
+                print(string.format("  %s: %s (%d children)", c.ClassName, c.Name, #c:GetChildren()))
+            end
+            local rarities = assets:FindFirstChild("Rarities")
+            if rarities then
+                print("\n[RS.Assets.Rarities children]")
+                for _, c in ipairs(rarities:GetChildren()) do
+                    print("  ", c.ClassName, c.Name)
+                end
+            end
+        end
+
+        -- 7) Deep PlayerScripts scan — sometimes the client mirrors state here
+        local ps = LocalPlayer:FindFirstChild("PlayerScripts")
+        if ps then
+            print("\n[PlayerScripts top-level]")
+            for _, c in ipairs(ps:GetChildren()) do
+                print(string.format("  %s: %s", c.ClassName, c.Name))
+            end
+        end
+
+        -- 8) Workspace top-level + any folder named like player data
+        print("\n[Workspace folders matching player/data/profile]")
+        for _, c in ipairs(workspace:GetChildren()) do
+            local n = c.Name:lower()
+            if c:IsA("Folder") and (n:find("player") or n:find("data") or n:find("profile")) then
                 print(string.format("  %s: %s (%d children)", c.ClassName, c.Name, #c:GetChildren()))
             end
         end
