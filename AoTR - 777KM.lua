@@ -1603,108 +1603,105 @@ local function fmtNum(n)
 end
 
 sendMatchWebhook = function(matchNum)
-    local data  = fetchRewardsRemote()
-    local gold  = getGold()
-    local gems  = getGems()
+    local data    = fetchRewardsRemote()
+    local gold    = getGold()
+    local gems    = getGems()
     local level   = LocalPlayer:GetAttribute("Level")
     local streak  = LocalPlayer:GetAttribute("Streak")
-    local title   = LocalPlayer:GetAttribute("Title")
 
-    -- Player identity for the embed header
-    local userId       = LocalPlayer.UserId
-    local username     = LocalPlayer.Name
-    local displayName  = LocalPlayer.DisplayName
-    local headerName   = (displayName ~= username)
+    local userId      = LocalPlayer.UserId
+    local username    = LocalPlayer.Name
+    local displayName = LocalPlayer.DisplayName
+    local headerName  = (displayName ~= username)
         and string.format("%s (@%s)", displayName, username)
         or username
-    -- Direct-image thumbnail endpoint (Discord follows the redirect)
-    local avatarUrl    = string.format(
+    local avatarUrl   = string.format(
         "https://www.roblox.com/headshot-thumbnail/image?userId=%d&width=420&height=420&format=png",
         userId)
-    local profileUrl   = "https://www.roblox.com/users/" .. tostring(userId) .. "/profile"
+    local profileUrl  = "https://www.roblox.com/users/" .. tostring(userId) .. "/profile"
 
-    -- Pretty title (underscored Title attribute -> spaced)
-    local titlePretty = title and tostring(title):gsub("_", " ") or nil
+    local win     = data and data.Completed == true
+    local s       = (data and data.Stats)    or {}
+    local o       = (data and data.Obtained) or {}
+    local timeStr = fmtSeconds(lastMatchSeconds)
 
-    local win = data and data.Completed == true
-    local s = (data and data.Stats)    or {}
-    local o = (data and data.Obtained) or {}
+    -- Code-block helper: monospaced boxed look (matches the minimalist
+    -- reference style — key-value lines aligned by spacing).
+    local function codeBlock(text) return "```\n" .. text .. "\n```" end
 
-    -- ===== Top description: result + match # + time + title =====
-    local resultEmoji = win and "🏆" or "💀"
-    local resultLabel = win and "Victory" or "Defeat"
-    local timeStr     = fmtSeconds(lastMatchSeconds)
-    local description = string.format(
-        "**Match #%d**  •  %s **%s**  •  ⏱ `%s`%s",
-        matchNum, resultEmoji, resultLabel, timeStr,
-        titlePretty and ("\n*" .. titlePretty .. "*") or "")
+    -- ===== Information (left column) =====
+    local infoBlock = codeBlock(string.format(
+        "User: %s\nMatch: #%d\nResult: %s\nTime: %s",
+        username, matchNum,
+        win and "Victory" or "Defeat",
+        timeStr))
 
-    -- ===== Inline two-column layout: Player | Combat =====
-    local playerField = string.format(
-        "🎚 Level **%s**\n🔥 Streak **%s**\n🪙 Gold **%s**\n💎 Gems **%s**",
+    -- ===== Total Stats (middle column) =====
+    local statsBlock = codeBlock(string.format(
+        "Level:  %s\nStreak: %s\nGold:   %s\nGems:   %s",
         tostring(level or "?"),
         fmtNum(streak),
         fmtNum(gold),
-        fmtNum(gems))
+        fmtNum(gems)))
 
-    local combatField = string.format(
-        "⚔ Damage **%s**\n💀 Kills **%s**\n🎯 Crits **%s**\n👹 Boss DMG **%s**",
-        fmtNum(s.Damage), fmtNum(s.Kills), fmtNum(s.Crits), fmtNum(s.Boss_Damage))
+    -- ===== Combat (right column) =====
+    local combatBlock = codeBlock(string.format(
+        "Damage: %s\nKills:  %s\nCrits:  %s\nBoss:   %s",
+        fmtNum(s.Damage), fmtNum(s.Kills), fmtNum(s.Crits), fmtNum(s.Boss_Damage)))
 
     local fields = {
-        { name = "👤 Player",  value = playerField,  inline = true },
-        { name = "⚔ Combat", value = combatField, inline = true },
+        { name = "Information", value = infoBlock,   inline = true },
+        { name = "Total Stats", value = statsBlock,  inline = true },
+        { name = "Combat",      value = combatBlock, inline = true },
     }
 
-    -- ===== Obtained section — only show what was actually earned =====
-    local lines = {}
-    local function add(emoji, label, val)
+    -- ===== Rewards (full width) — only non-zero / non-empty =====
+    local rewardLines = {}
+    local function add(label, val)
         if type(val) == "number" and val > 0 then
-            lines[#lines + 1] = string.format("%s **%s** %s", emoji, fmtNum(val), label)
+            rewardLines[#rewardLines + 1] = string.format("[+] %s (x%s)", label, fmtNum(val))
         end
     end
-    add("✨", "XP",     o.XP)
-    add("🪙", "Gold",   o.Gold)
-    add("💎", "Gems",   o.Gems)
-    add("🥈", "Silver", o.Silver)
-    add("🌟", "BP XP",  o.BP_XP)
-    add("🔷", "Shards", o.Shards)
-    add("🍬", "Canes",  o.Canes)
+    add("XP",     o.XP)
+    add("Gold",   o.Gold)
+    add("Gems",   o.Gems)
+    add("Silver", o.Silver)
+    add("Shards", o.Shards)
+    add("BP_XP",  o.BP_XP)
+    add("Canes",  o.Canes)
 
-    if type(o.Perks) == "table" and #o.Perks > 0 then
-        local tagged = {}
+    if type(o.Perks) == "table" then
         for _, p in ipairs(o.Perks) do
-            tagged[#tagged + 1] = formatPerkWithRarity(p)
+            local r = PERK_RARITY[p]
+            local txt = r and (p .. " [" .. r .. "]") or p
+            rewardLines[#rewardLines + 1] = "[+] Perk: " .. txt
         end
-        lines[#lines + 1] = "🎴 " .. table.concat(tagged, " • ")
     end
 
     for _, k in ipairs({ "Drops", "Chests" }) do
         local t = o[k]
         if type(t) == "table" and next(t) then
-            local parts = {}
             for kk, vv in pairs(t) do
-                parts[#parts + 1] = tostring(kk) .. " ×" .. tostring(vv)
+                rewardLines[#rewardLines + 1] = string.format("[+] %s (x%s)", tostring(kk), tostring(vv))
             end
-            local icon = (k == "Drops") and "📦" or "🗝"
-            lines[#lines + 1] = icon .. " " .. table.concat(parts, ", ")
         end
     end
 
-    if #lines > 0 then
+    if #rewardLines > 0 then
         fields[#fields + 1] = {
-            name   = "🎁 Obtained",
-            value  = table.concat(lines, "\n"),
+            name   = "Rewards",
+            value  = codeBlock(table.concat(rewardLines, "\n")),
             inline = false,
         }
     end
 
-    -- Loss fallback (no S_Rewards data) — still show player + basic info
+    -- Loss fallback (no S_Rewards data) — still show identity + basic info
     if not data then
-        description = string.format(
-            "**Match #%d**  •  💀 **Defeat**  •  ⏱ `%s`%s\n-# *S_Rewards capture unavailable*",
-            matchNum, timeStr,
-            titlePretty and ("\n*" .. titlePretty .. "*") or "")
+        fields = {
+            { name = "Information", value = infoBlock,  inline = true },
+            { name = "Total Stats", value = statsBlock, inline = true },
+            { name = "Note",        value = codeBlock("S_Rewards capture\nunavailable"), inline = true },
+        }
     end
 
     local payload = {
@@ -1716,12 +1713,10 @@ sendMatchWebhook = function(matchNum)
                 icon_url = avatarUrl,
                 url      = profileUrl,
             },
-            title       = resultEmoji .. " " .. (win and "Mission Completed" or "Mission Failed"),
+            title       = win and "Mission Completed" or "Mission Failed",
             url         = profileUrl,
-            description = description,
-            color       = win and 0xFFD700 or 0xED4245,  -- gold for win, red for loss
+            color       = win and 0xFFD700 or 0xED4245,
             fields      = fields,
-            thumbnail   = { url = avatarUrl },
             footer      = {
                 text = string.format("AoT:R Freemium by 777KM  •  Match #%d", matchNum),
             },
