@@ -1010,7 +1010,45 @@ end
 -- each gameplay Actor that intercepts the actor's S_Rewards InvokeServer
 -- calls, captures the return value, and bridges it to the main thread for
 -- logging. Same per-actor injection pattern AOTR Spy.lua uses for namecall.
-local SNIFF_BRIDGE = "AOTR_RewardsSniffer_777KM"
+local SNIFF_BRIDGE   = "AOTR_RewardsSniffer_777KM"
+local SNIFF_LOG_FILE = "AOTR_Sniffs.txt"
+
+-- File appender: tries every common executor API. Falls back to read+write
+-- if no native append exists (slower but works on Synapse). Returns a
+-- function that takes a single string and tacks it onto the file.
+local sniffAppend = (function()
+    local nativeAppend = appendfile
+                      or (syn and syn.append_file)
+    if nativeAppend then
+        return function(text) pcall(nativeAppend, SNIFF_LOG_FILE, text) end
+    end
+    -- Fallback: read existing + write back. Only used if executor has no
+    -- native append. Cap re-reads to avoid quadratic IO on long sessions.
+    local writer = writefile or (syn and syn.write_file) or (fluxus and fluxus.writefile)
+    local reader = readfile  or (syn and syn.read_file)
+    local exists = isfile    or (syn and syn.isfile)
+    if writer then
+        return function(text)
+            local prior = ""
+            if exists and pcall(exists, SNIFF_LOG_FILE) and exists(SNIFF_LOG_FILE) and reader then
+                local ok, r = pcall(reader, SNIFF_LOG_FILE); if ok then prior = r or "" end
+            end
+            pcall(writer, SNIFF_LOG_FILE, prior .. text)
+        end
+    end
+    return function() end  -- no-op if no file API
+end)()
+
+-- Wipe the log at script load so each session starts fresh. Skip if no
+-- writer is available (sniffAppend no-ops anyway).
+do
+    local writer = writefile or (syn and syn.write_file) or (fluxus and fluxus.writefile)
+    if writer then
+        pcall(writer, SNIFF_LOG_FILE,
+            string.format("===== AOTR Sniffer session start: %s =====\n", os.date()))
+    end
+end
+
 do
     local CoreGui = game:GetService("CoreGui")
     local existing = CoreGui:FindFirstChild(SNIFF_BRIDGE)
@@ -1018,18 +1056,28 @@ do
     local b = Instance.new("BindableEvent")
     b.Name   = SNIFF_BRIDGE
     b.Parent = CoreGui
+
+    -- Prints to console AND appends to the sniff log file. All sniffer
+    -- output (including nested table walks) routes through this helper so
+    -- the file mirrors exactly what's on the screen.
+    local function sp(line)
+        line = tostring(line)
+        print(line)
+        sniffAppend(line .. "\n")
+    end
+
     local function deepPrint(t, indent, seen)
         indent = indent or "   "
         seen = seen or {}
-        if seen[t] then print(indent .. "<cyclic>") return end
+        if seen[t] then sp(indent .. "<cyclic>") return end
         seen[t] = true
         for k, v in pairs(t) do
             if type(v) == "table" then
-                print(indent .. tostring(k) .. " = {")
+                sp(indent .. tostring(k) .. " = {")
                 deepPrint(v, indent .. "    ", seen)
-                print(indent .. "}")
+                sp(indent .. "}")
             else
-                print(indent .. tostring(k) .. " = " .. tostring(v) .. "  (" .. type(v) .. ")")
+                sp(indent .. tostring(k) .. " = " .. tostring(v) .. "  (" .. type(v) .. ")")
             end
         end
     end
@@ -1037,20 +1085,20 @@ do
         if type(data) ~= "table" then return end
         -- S_Rewards always feeds the cache used by the webhook.
         if data.service == "S_Rewards" then
-            print(string.format("[Sniff S_Rewards] action=%s arg3=%s returnType=%s",
+            sp(string.format("[Sniff S_Rewards] action=%s arg3=%s returnType=%s",
                 tostring(data.action), tostring(data.arg3), type(data.result)))
             if type(data.result) == "table" then
                 deepPrint(data.result)
                 latestRewardsCapture = { ts = tick(), data = data.result }
             else
-                print("   value =", tostring(data.result))
+                sp("   value = " .. tostring(data.result))
             end
             return
         end
         -- Every other unique call (deduped at actor side) — discovery log.
         -- Tag with the remote name so we can tell GET vs GET_2 (the per-
         -- match remote that only exists in-mission).
-        print(string.format("[SNIFF %s] %s/%s -> type=%s value=%s",
+        sp(string.format("[SNIFF %s] %s/%s -> type=%s value=%s",
             tostring(data.remote or "?"),
             tostring(data.service), tostring(data.action),
             type(data.result), tostring(data.result)))
