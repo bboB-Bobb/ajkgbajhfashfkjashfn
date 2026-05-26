@@ -981,12 +981,13 @@ local mutedForRetry = false
 -- server-side anti-cheat / shadow-ban heuristics flag. Smooth motion looks
 -- like ODM gear gliding.
 --
--- Three anti-flag tricks layered in:
---   1. Per-frame Lerp at MOVE_SPEED studs/sec (no instant jumps)
+-- Anti-flag tricks layered in:
+--   1. Per-frame step at MOVE_SPEED studs/sec (no instant jumps)
 --   2. Y-jitter reseeded per target (not pixel-perfect every frame)
---   3. Only zero velocity when parked, not while traveling (lets the
---      physics engine see consistent momentum during travel)
-local MOVE_SPEED     = 90   -- studs/sec; tune up/down for risk vs speed
+--   3. AssemblyLinearVelocity set to match the step direction — keeps
+--      reported velocity and actual position-delta consistent (the check
+--      most anti-cheats run) AND cancels gravity so we don't fall.
+local MOVE_SPEED     = 200  -- studs/sec; AoT:R ODM-class speed
 local Y_JITTER       = 5    -- ±5 studs hover-height variance per target
 local jitterOffsetY  = 0
 local lastSeenTarget = nil
@@ -1014,15 +1015,19 @@ RunService.Heartbeat:Connect(function(dt)
 
     local maxStep = MOVE_SPEED * dt
     local stepLen = math.min(maxStep, distance)
-    local newPos  = root.Position + toTarget.Unit * stepLen
+    local direction = toTarget.Unit
+    local newPos  = root.Position + direction * stepLen
 
     -- Preserve current rotation; CFrame.new(pos) * rot keeps orientation.
     root.CFrame = CFrame.new(newPos) * root.CFrame.Rotation
 
-    -- Park brake: only zero velocity once we're hovering in place. While
-    -- traveling, let physics show real momentum.
+    -- Set velocity to match the move direction at MOVE_SPEED. This (a)
+    -- cancels gravity so we don't fall, (b) makes server-reported velocity
+    -- consistent with our position delta. Park (zero velocity) when close.
     if distance < 5 then
         root.AssemblyLinearVelocity = Vector3.zero
+    else
+        root.AssemblyLinearVelocity = direction * MOVE_SPEED
     end
 end)
 
