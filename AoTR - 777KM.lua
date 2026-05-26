@@ -1593,121 +1593,139 @@ local function fmtSeconds(s)
     return string.format("%02d:%02d", m, r)
 end
 
+-- Format big numbers with comma separators: 1234567 -> "1,234,567"
+local function fmtNum(n)
+    if type(n) ~= "number" then return tostring(n or "0") end
+    local s = tostring(math.floor(n))
+    -- reverse-then-comma trick (faster than gmatch for short strings)
+    s = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+    return (s:gsub("^,", ""))
+end
+
 sendMatchWebhook = function(matchNum)
     local data  = fetchRewardsRemote()
-    local money = getGold()
+    local gold  = getGold()
     local gems  = getGems()
     local level   = LocalPlayer:GetAttribute("Level")
     local streak  = LocalPlayer:GetAttribute("Streak")
     local title   = LocalPlayer:GetAttribute("Title")
 
-    local win, fields
-    if data then
-        -- Trust the remote completely; it's authoritative server-side data.
-        win = data.Completed == true
-        local s = data.Stats    or {}
-        local o = data.Obtained or {}
+    -- Player identity for the embed header
+    local userId       = LocalPlayer.UserId
+    local username     = LocalPlayer.Name
+    local displayName  = LocalPlayer.DisplayName
+    local headerName   = (displayName ~= username)
+        and string.format("%s (@%s)", displayName, username)
+        or username
+    -- Direct-image thumbnail endpoint (Discord follows the redirect)
+    local avatarUrl    = string.format(
+        "https://www.roblox.com/headshot-thumbnail/image?userId=%d&width=420&height=420&format=png",
+        userId)
+    local profileUrl   = "https://www.roblox.com/users/" .. tostring(userId) .. "/profile"
 
-        local function fmt(v)
-            if v == nil then return "0" end
-            if type(v) == "number" then return tostring(v) end
-            return tostring(v)
-        end
+    -- Pretty title (underscored Title attribute -> spaced)
+    local titlePretty = title and tostring(title):gsub("_", " ") or nil
 
-        fields = {}
+    local win = data and data.Completed == true
+    local s = (data and data.Stats)    or {}
+    local o = (data and data.Obtained) or {}
+
+    -- ===== Top description: result + match # + time + title =====
+    local resultEmoji = win and "🏆" or "💀"
+    local resultLabel = win and "Victory" or "Defeat"
+    local timeStr     = fmtSeconds(lastMatchSeconds)
+    local description = string.format(
+        "**Match #%d**  •  %s **%s**  •  ⏱ `%s`%s",
+        matchNum, resultEmoji, resultLabel, timeStr,
+        titlePretty and ("\n*" .. titlePretty .. "*") or "")
+
+    -- ===== Inline two-column layout: Player | Combat =====
+    local playerField = string.format(
+        "🎚 Level **%s**\n🔥 Streak **%s**\n🪙 Gold **%s**\n💎 Gems **%s**",
+        tostring(level or "?"),
+        fmtNum(streak),
+        fmtNum(gold),
+        fmtNum(gems))
+
+    local combatField = string.format(
+        "⚔ Damage **%s**\n💀 Kills **%s**\n🎯 Crits **%s**\n👹 Boss DMG **%s**",
+        fmtNum(s.Damage), fmtNum(s.Kills), fmtNum(s.Crits), fmtNum(s.Boss_Damage))
+
+    local fields = {
+        { name = "👤 Player",  value = playerField,  inline = true },
+        { name = "⚔ Combat", value = combatField, inline = true },
+    }
+
+    -- ===== Obtained section — only show what was actually earned =====
+    local lines = {}
+    local function add(emoji, label, val)
+        if type(val) == "number" and val > 0 then
+            lines[#lines + 1] = string.format("%s **%s** %s", emoji, fmtNum(val), label)
+        end
+    end
+    add("✨", "XP",     o.XP)
+    add("🪙", "Gold",   o.Gold)
+    add("💎", "Gems",   o.Gems)
+    add("🥈", "Silver", o.Silver)
+    add("🌟", "BP XP",  o.BP_XP)
+    add("🔷", "Shards", o.Shards)
+    add("🍬", "Canes",  o.Canes)
+
+    if type(o.Perks) == "table" and #o.Perks > 0 then
+        local tagged = {}
+        for _, p in ipairs(o.Perks) do
+            tagged[#tagged + 1] = formatPerkWithRarity(p)
+        end
+        lines[#lines + 1] = "🎴 " .. table.concat(tagged, " • ")
+    end
+
+    for _, k in ipairs({ "Drops", "Chests" }) do
+        local t = o[k]
+        if type(t) == "table" and next(t) then
+            local parts = {}
+            for kk, vv in pairs(t) do
+                parts[#parts + 1] = tostring(kk) .. " ×" .. tostring(vv)
+            end
+            local icon = (k == "Drops") and "📦" or "🗝"
+            lines[#lines + 1] = icon .. " " .. table.concat(parts, ", ")
+        end
+    end
+
+    if #lines > 0 then
         fields[#fields + 1] = {
-            name   = "Match",
-            value  = string.format("#%d  -  %s", matchNum, win and "WIN" or "LOSS"),
+            name   = "🎁 Obtained",
+            value  = table.concat(lines, "\n"),
             inline = false,
-        }
-        fields[#fields + 1] = {
-            name   = "Time",
-            -- data.Seconds is always 0 in S_Rewards (server quirk) — don't
-            -- fall back to it. lastMatchSeconds is tick()-based from the
-            -- Modifiers attribute transition; nil if we missed the start
-            -- edge (script loaded mid-match), in which case show "?".
-            value  = fmtSeconds(lastMatchSeconds),
-            inline = true,
-        }
-        fields[#fields + 1] = {
-            name   = "Player",
-            value  = string.format("Level: %s\nStreak: %s\n%s",
-                tostring(level or "?"), tostring(streak or "?"),
-                title and ("Title: " .. tostring(title)) or ""),
-            inline = true,
-        }
-        fields[#fields + 1] = {
-            name   = "Total",
-            value  = string.format("Gold: %s\nGems: %s",
-                money and tostring(money) or "?",
-                gems and tostring(gems) or "?"),
-            inline = true,
-        }
-        fields[#fields + 1] = {
-            name   = "Stats",
-            value  = string.format(
-                "Damage: %s\nKills: %s\nCrits: %s\nBoss DMG: %s",
-                fmt(s.Damage), fmt(s.Kills), fmt(s.Crits), fmt(s.Boss_Damage)
-            ),
-            inline = false,
-        }
-        -- Currencies/items. Show only non-zero numerics so the embed stays clean.
-        local obtainedLines = {}
-        local order = { "XP", "Gold", "Silver", "Gems", "Shards", "BP_XP", "Canes" }
-        for _, k in ipairs(order) do
-            local v = o[k]
-            if type(v) == "number" and v > 0 then
-                obtainedLines[#obtainedLines + 1] = string.format("%s: %s", k, tostring(v))
-            end
-        end
-        -- Perks (string list) — tag each with rarity via PERK_RARITY LUT
-        if type(o.Perks) == "table" and #o.Perks > 0 then
-            local tagged = {}
-            for _, p in ipairs(o.Perks) do
-                tagged[#tagged + 1] = formatPerkWithRarity(p)
-            end
-            obtainedLines[#obtainedLines + 1] = "Perks: " .. table.concat(tagged, ", ")
-        end
-        -- Drops / Chests (only if populated; empty tables hidden)
-        for _, k in ipairs({ "Drops", "Chests" }) do
-            local t = o[k]
-            if type(t) == "table" and next(t) then
-                local parts = {}
-                for kk, vv in pairs(t) do
-                    parts[#parts + 1] = tostring(kk) .. "=" .. tostring(vv)
-                end
-                obtainedLines[#obtainedLines + 1] = k .. ": " .. table.concat(parts, ", ")
-            end
-        end
-        if #obtainedLines > 0 then
-            fields[#fields + 1] = {
-                name   = "Obtained",
-                value  = table.concat(obtainedLines, "\n"),
-                inline = false,
-            }
-        end
-    else
-        -- Remote was nil — likely the sniffer hasn't installed (executor
-        -- without getactors/run_on_actor). Send a minimal embed so the
-        -- user still sees the match.
-        win = false
-        fields = {
-            { name = "Match", value = string.format("#%d", matchNum), inline = false },
-            { name = "Status", value = "S_Rewards capture missing — Actor sniffer may not be installed.", inline = false },
-            { name = "Player", value = string.format("Level: %s\nStreak: %s",
-                tostring(level or "?"), tostring(streak or "?")), inline = true },
-            { name = "Total", value = string.format("Gold: %s\nGems: %s",
-                money and tostring(money) or "?",
-                gems and tostring(gems) or "?"), inline = true },
         }
     end
 
+    -- Loss fallback (no S_Rewards data) — still show player + basic info
+    if not data then
+        description = string.format(
+            "**Match #%d**  •  💀 **Defeat**  •  ⏱ `%s`%s\n-# *S_Rewards capture unavailable*",
+            matchNum, timeStr,
+            titlePretty and ("\n*" .. titlePretty .. "*") or "")
+    end
+
     local payload = {
-        username = "AoT:R Freemium",
-        embeds   = {{
-            title  = win and "Mission Completed" or "Mission Failed",
-            color  = win and 0x57F287 or 0xED4245,
-            fields = fields,
+        username    = "AoT:R Freemium",
+        avatar_url  = avatarUrl,
+        embeds      = {{
+            author = {
+                name     = headerName,
+                icon_url = avatarUrl,
+                url      = profileUrl,
+            },
+            title       = resultEmoji .. " " .. (win and "Mission Completed" or "Mission Failed"),
+            url         = profileUrl,
+            description = description,
+            color       = win and 0xFFD700 or 0xED4245,  -- gold for win, red for loss
+            fields      = fields,
+            thumbnail   = { url = avatarUrl },
+            footer      = {
+                text = string.format("AoT:R Freemium by 777KM  •  Match #%d", matchNum),
+            },
+            timestamp   = os.date("!%Y-%m-%dT%H:%M:%SZ"),
         }},
     }
 
