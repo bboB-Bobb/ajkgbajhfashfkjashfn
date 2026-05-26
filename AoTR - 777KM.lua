@@ -1272,17 +1272,24 @@ local function injectSniffer()
         pcall(run_on_actor, actor, sniffHookSrc)
     end
 end
-injectSniffer()
-LocalPlayer.CharacterAdded:Connect(function()
-    task.wait(0.5)
+
+-- Sniffer disabled to keep console clean. Webhook still works via the
+-- active Data/Copy poll (every 30s) and the S_Rewards "Get Last"
+-- fallback. Re-enable by setting SNIFFER_ENABLED = true.
+local SNIFFER_ENABLED = false
+if SNIFFER_ENABLED then
     injectSniffer()
-end)
-game.DescendantAdded:Connect(function(d)
-    if d:IsA("Actor") and run_on_actor then
-        task.wait(0.3)
-        pcall(run_on_actor, d, sniffHookSrc)
-    end
-end)
+    LocalPlayer.CharacterAdded:Connect(function()
+        task.wait(0.5)
+        injectSniffer()
+    end)
+    game.DescendantAdded:Connect(function(d)
+        if d:IsA("Actor") and run_on_actor then
+            task.wait(0.3)
+            pcall(run_on_actor, d, sniffHookSrc)
+        end
+    end)
+end
 
 --------- Utility: shared UI paths ---------
 -- All paths are inside PlayerGui.Interface; resolved each time because the
@@ -2112,6 +2119,57 @@ UtilBox:AddButton({
         if stats then deep(stats, "  ", nil, 3) else p("ERR: " .. tostring(err2)) end
 
         flush("AOTR_Perks_Stats.txt")
+    end,
+})
+
+UtilBox:AddButton({
+    Text = "Debug Match State",
+    Func = function()
+        local p, flush = newDumpSink()
+        p("===== MATCH STATE DEBUG @ " .. os.date() .. " =====")
+
+        p("\n[isInMatch()]")
+        p("  result = " .. tostring(isInMatch()))
+
+        p("\n[Workspace.Modifiers attribute]")
+        local mod = Workspace:GetAttribute("Modifiers")
+        p("  value = " .. tostring(mod) .. "  (" .. type(mod) .. ")")
+        p("  ~= nil = " .. tostring(mod ~= nil))
+
+        p("\n[Workspace.Seconds attribute]")
+        local sec = Workspace:GetAttribute("Seconds")
+        p("  value = " .. tostring(sec) .. "  (" .. type(sec) .. ")")
+
+        p("\n[RS.Assets.Remotes children]")
+        local assets  = RS:FindFirstChild("Assets")
+        local remotes = assets and assets:FindFirstChild("Remotes")
+        if remotes then
+            for _, c in ipairs(remotes:GetChildren()) do
+                p("  " .. c.ClassName .. ": " .. c.Name)
+            end
+        else
+            p("  (Remotes folder not found)")
+        end
+
+        p("\n[Tracked state]")
+        p("  matchStartTick   = " .. tostring(matchStartTick))
+        p("  lastInMatch      = " .. tostring(lastInMatch))
+        p("  lastMatchSeconds = " .. tostring(lastMatchSeconds))
+        if matchStartTick then
+            p("  current duration = " .. tostring(math.floor(tick() - matchStartTick)) .. "s")
+        end
+
+        p("\n[Rewards UI]")
+        local r = getRewardsFrame()
+        p("  frame = " .. tostring(r))
+        p("  visible = " .. tostring(r and r.Visible))
+
+        p("\n[Workspace all attributes]")
+        for k, v in pairs(Workspace:GetAttributes()) do
+            p(string.format("  %s = %s  (%s)", tostring(k), tostring(v), type(v)))
+        end
+
+        flush("AOTR_Match_State_Debug.txt")
     end,
 })
 
