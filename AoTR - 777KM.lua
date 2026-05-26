@@ -58,6 +58,14 @@ local Tabs = {
     ["UI Settings"] = Window:AddTab("UI Settings", "settings"),
 }
 
+-- Forward declarations so UI button Funcs registered below can reference
+-- helpers that are actually defined further down in FEATURE IMPLEMENTATIONS.
+-- The closures capture these locals by reference, so calls at click-time
+-- see the assigned function bodies.
+local postWebhook
+local sendMatchWebhook
+local getMoney
+
 --===========================================================
 -- Common helpers
 --===========================================================
@@ -141,6 +149,7 @@ CombatBox:AddSlider("MultiHitCount", {
 })
 
 local TitanCountLabel = CombatBox:AddLabel("Titans: 0", true)
+local MoneyLabel      = CombatBox:AddLabel("Money: ?",  true)
 
 local NapeBox = Tabs.Combat:AddRightGroupbox("Nape", "target")
 
@@ -310,6 +319,37 @@ MiscBox:AddButton({
     end,
 })
 
+local WebhookBox = Tabs.Misc:AddRightGroupbox("Webhook", "send")
+WebhookBox:AddToggle("WebhookEnabled", {
+    Text    = "Enable Match Webhook",
+    Default = false,
+    Tooltip = "POST to a Discord webhook every time a match ends (Win/Loss).",
+})
+WebhookBox:AddInput("WebhookURL", {
+    Text        = "Discord URL",
+    Default     = "",
+    Placeholder = "https://discord.com/api/webhooks/...",
+    Tooltip     = "Discord webhook URL. Saved with your config.",
+})
+WebhookBox:AddButton({
+    Text = "Test Webhook",
+    Func = function()
+        if not postWebhook then
+            Library:Notify("postWebhook not ready yet", 3)
+            return
+        end
+        local ok, err = postWebhook({
+            content = "AoT:R Freemium - test ping",
+            embeds  = {{
+                title       = "Test",
+                description = "Webhook reachable",
+                color       = 0xFFD700,
+            }},
+        })
+        Library:Notify(ok and "Webhook sent" or ("Failed: " .. tostring(err)), 4)
+    end,
+})
+
 local CreditsBox = Tabs.Misc:AddRightGroupbox("Credits", "heart")
 CreditsBox:AddLabel("AoT:R Freemium by 777KM", true)
 CreditsBox:AddLabel("UI: Obsidian by deividcomsono", true)
@@ -317,6 +357,38 @@ CreditsBox:AddLabel("UI: Obsidian by deividcomsono", true)
 --===========================================================
 -- ============== FEATURE IMPLEMENTATIONS ==================
 --===========================================================
+
+--------- Webhook HTTP helper ---------
+-- Picks whichever request function the user's executor exposes. All major
+-- executors (Synapse, Script-Ware, Krnl, AWP, Wave, etc.) expose at least
+-- one of these globals.
+local httpRequest = (syn and syn.request)
+                 or (http and http.request)
+                 or (fluxus and fluxus.request)
+                 or request
+                 or http_request
+local HttpService = game:GetService("HttpService")
+
+-- Assigned to the forward-declared `postWebhook` upvalue so the Test button
+-- (registered above in the UI section) sees the live function body.
+postWebhook = function(payload)
+    if not httpRequest then return false, "no request function" end
+    local url = Options.WebhookURL and Options.WebhookURL.Value
+    if not url or url == "" then return false, "no URL" end
+    local ok, resp = pcall(httpRequest, {
+        Url     = url,
+        Method  = "POST",
+        Headers = { ["Content-Type"] = "application/json" },
+        Body    = HttpService:JSONEncode(payload),
+    })
+    if not ok then return false, tostring(resp) end
+    -- Discord returns 204 No Content on success; treat 2xx as ok.
+    local status = (type(resp) == "table") and (resp.StatusCode or resp.Status) or nil
+    if status and (status < 200 or status >= 300) then
+        return false, "HTTP " .. tostring(status)
+    end
+    return true
+end
 
 --------- FOV ---------
 Options.FOV:OnChanged(function()
@@ -518,6 +590,61 @@ task.spawn(function()
             pcall(function() TitanCountLabel:SetText("Titans: " .. countAliveTitans()) end)
         end
         task.wait(0.25)
+    end
+end)
+
+--------- Money read (lobby UI label; nil during matches) ---------
+-- Hardcoded PlayerGui path is filled in once the user runs the "Spy Money
+-- Path" debug button in the lobby and pastes the result back. Until then,
+-- the label and webhook show "?". `lastKnownMoney` caches the most recent
+-- read so the webhook still carries a value even after the lobby UI tears
+-- down at match start (the label inside the lobby panel is unparented mid-
+-- match in many Roblox games).
+local cachedMoneyLabel = nil
+local lastKnownMoney   = nil
+
+-- Edit this list once you know the real path. Each entry is a function that
+-- walks PlayerGui from a likely starting point and returns a TextLabel/TextBox.
+-- The first one that resolves wins. Add the real path on top.
+local moneyPathCandidates = {
+    function()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if not pg then return nil end
+        -- PLACEHOLDER — replace once "Spy Money Path" finds the real one.
+        -- e.g. return pg.Interface.Lobby.Currency.Amount
+        return nil
+    end,
+}
+
+local function resolveMoneyLabel()
+    if cachedMoneyLabel and cachedMoneyLabel.Parent then return cachedMoneyLabel end
+    cachedMoneyLabel = nil
+    for _, fn in ipairs(moneyPathCandidates) do
+        local ok, result = pcall(fn)
+        if ok and result and (result:IsA("TextLabel") or result:IsA("TextBox")) then
+            cachedMoneyLabel = result
+            return result
+        end
+    end
+    return nil
+end
+
+getMoney = function()
+    local lbl = resolveMoneyLabel()
+    if not lbl then return lastKnownMoney end
+    local n = tonumber((lbl.Text or ""):gsub("[^%d]", ""))
+    if n then lastKnownMoney = n end
+    return lastKnownMoney
+end
+
+task.spawn(function()
+    while not Library.Unloaded do
+        if MoneyLabel and MoneyLabel.SetText then
+            local m = getMoney()
+            local txt = m and ("Money: " .. tostring(m)) or "Money: ?"
+            pcall(function() MoneyLabel:SetText(txt) end)
+        end
+        task.wait(0.5)
     end
 end)
 
@@ -1013,6 +1140,162 @@ task.spawn(function()
         task.wait(0.3)
     end
 end)
+
+--------- Match-end webhook (edge-triggered on Rewards.Visible) ---------
+-- Independent of AutoRetry: webhook fires on every match end whether or
+-- not AutoRetry is enabled. Detects Win vs Loss by scanning the Rewards
+-- subtree for a TextLabel containing "MISSION COMPLETED" (case-insensitive
+-- match for safety). Dumps every readable TextLabel into the embed so the
+-- user gets stats + obtained rewards without us having to hardcode each
+-- nested path — we can refine the layout once the dump shows what's there.
+
+local function gatherRewardsText()
+    local r = getRewardsFrame()
+    if not r then return {}, false end
+    local lines = {}
+    local win   = false
+    for _, d in ipairs(r:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextBox")) then
+            local t = d.Text
+            if t and t ~= "" then
+                lines[#lines + 1] = t
+                if string.find(string.upper(t), "MISSION COMPLETED", 1, true) then
+                    win = true
+                end
+            end
+        end
+    end
+    return lines, win
+end
+
+local function fetchRemoteRewards()
+    local GET = getGET()
+    if not GET then return nil end
+    local ok, result = pcall(GET.InvokeServer, GET, "S_Rewards", "Get", true)
+    if ok and type(result) == "table" then return result end
+    return nil
+end
+
+local function summarizeRemote(tbl)
+    if type(tbl) ~= "table" then return nil end
+    local parts = {}
+    for k, v in pairs(tbl) do
+        if type(v) == "table" then
+            parts[#parts + 1] = string.format("%s: <table>", tostring(k))
+        else
+            parts[#parts + 1] = string.format("%s: %s", tostring(k), tostring(v))
+        end
+    end
+    if #parts == 0 then return nil end
+    return table.concat(parts, "\n")
+end
+
+sendMatchWebhook = function(matchNum)
+    local lines, win = gatherRewardsText()
+    local money = getMoney()
+    local remote = fetchRemoteRewards()
+    local remoteText = summarizeRemote(remote)
+
+    local fields = {}
+    fields[#fields + 1] = {
+        name   = "Match",
+        value  = string.format("#%d  -  %s", matchNum, win and "WIN" or "LOSS"),
+        inline = false,
+    }
+    fields[#fields + 1] = {
+        name   = "Money",
+        value  = money and tostring(money) or "?",
+        inline = true,
+    }
+    if #lines > 0 then
+        local joined = table.concat(lines, "\n")
+        if #joined > 1000 then joined = string.sub(joined, 1, 1000) .. "..." end
+        fields[#fields + 1] = {
+            name   = "Rewards Screen",
+            value  = "```\n" .. joined .. "\n```",
+            inline = false,
+        }
+    end
+    if remoteText then
+        if #remoteText > 1000 then remoteText = string.sub(remoteText, 1, 1000) .. "..." end
+        fields[#fields + 1] = {
+            name   = "S_Rewards/Get",
+            value  = "```\n" .. remoteText .. "\n```",
+            inline = false,
+        }
+    end
+
+    local payload = {
+        username = "AoT:R Freemium",
+        embeds   = {{
+            title  = win and "Mission Completed" or "Mission Failed",
+            color  = win and 0x57F287 or 0xED4245,
+            fields = fields,
+        }},
+    }
+
+    local ok, err = postWebhook(payload)
+    if not ok then warn("[Webhook] " .. tostring(err)) end
+end
+
+local matchCount         = 0
+local lastRewardsVisible = false
+task.spawn(function()
+    while not Library.Unloaded do
+        local r = getRewardsFrame()
+        local v = (r and r.Visible) or false
+        if v and not lastRewardsVisible then
+            -- Edge: match just ended (works for both win and death).
+            matchCount = matchCount + 1
+            if Toggles.WebhookEnabled and Toggles.WebhookEnabled.Value then
+                task.spawn(sendMatchWebhook, matchCount)
+            end
+        end
+        lastRewardsVisible = v
+        task.wait(0.3)
+    end
+end)
+
+--------- Debug helpers (one-shot discovery) ---------
+UtilBox:AddButton({
+    Text = "Dump S_Rewards",
+    Func = function()
+        local GET = getGET()
+        if not GET then warn("[Dump] no GET remote") return end
+        local ok1, r1 = pcall(GET.InvokeServer, GET, "S_Rewards", "Get", true)
+        print("[S_Rewards true ] ok=", ok1, " result=", r1)
+        if type(r1) == "table" then
+            for k, v in pairs(r1) do print("   ", k, "=", v) end
+        end
+        local ok2, r2 = pcall(GET.InvokeServer, GET, "S_Rewards", "Get", false)
+        print("[S_Rewards false] ok=", ok2, " result=", r2)
+        if type(r2) == "table" then
+            for k, v in pairs(r2) do print("   ", k, "=", v) end
+        end
+        Library:Notify("S_Rewards dump in console", 3)
+    end,
+})
+
+UtilBox:AddButton({
+    Text = "Spy Money Path",
+    Func = function()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if not pg then warn("[Spy] no PlayerGui") return end
+        local count = 0
+        for _, d in ipairs(pg:GetDescendants()) do
+            if (d:IsA("TextLabel") or d:IsA("TextBox")) then
+                local t = d.Text or ""
+                -- Money labels are typically pure digits with optional commas
+                -- and sometimes a "$" / "K" / "M" suffix.
+                if t:match("^[%d,]+$") or t:match("^%$?[%d,]+[KM]?$") then
+                    count = count + 1
+                    print(string.format("[Money?] %s = %q", d:GetFullName(), t))
+                end
+            end
+        end
+        Library:Notify(string.format("Spy: %d candidate labels in console", count), 4)
+    end,
+})
 
 --------- Anti-AFK ---------
 LocalPlayer.Idled:Connect(function()
