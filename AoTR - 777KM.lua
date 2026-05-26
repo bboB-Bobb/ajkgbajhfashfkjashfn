@@ -1543,6 +1543,88 @@ UtilBox:AddButton({
     end,
 })
 
+UtilBox:AddButton({
+    Text = "Discover Profile",
+    Func = function()
+        print("\n========== PROFILE DISCOVERY ==========\n")
+
+        -- 1) LocalPlayer attributes (likely place for Gold/Gems/Level/Prestige)
+        print("[LocalPlayer Attributes]")
+        local attrCount = 0
+        for k, v in pairs(LocalPlayer:GetAttributes()) do
+            print(string.format("  %s = %s  (%s)", tostring(k), tostring(v), type(v)))
+            attrCount = attrCount + 1
+        end
+        if attrCount == 0 then print("  (none)") end
+
+        -- 2) LocalPlayer children (Data folders / leaderstats / Configuration / Profile)
+        print("\n[LocalPlayer Children]")
+        for _, c in ipairs(LocalPlayer:GetChildren()) do
+            print(string.format("  %s: %s", c.ClassName, c.Name))
+            if c:IsA("Folder") or c:IsA("Configuration") then
+                for _, cc in ipairs(c:GetDescendants()) do
+                    local val = ""
+                    if cc:IsA("ValueBase") then val = " = " .. tostring(cc.Value) end
+                    print(string.format("    %s: %s%s", cc.ClassName, cc.Name, val))
+                end
+            end
+        end
+
+        -- 3) Profile-style remote probes (try every plausible service+action combo)
+        local GET = getGET()
+        if GET then
+            print("\n[Profile Remote Probes — non-nil hits only]")
+            local services = {
+                "S_Player", "S_Profile", "S_Data", "S_Currency", "S_Stats",
+                "S_Account", "S_Inventory", "S_Save", "S_Save_Profile", "Profile",
+                "Player", "Data", "Currency",
+            }
+            local actions  = { "Get", "Load", "Profile", "Stats", "Data", "Fetch", "All", "Read" }
+            local hits = 0
+            for _, svc in ipairs(services) do
+                for _, act in ipairs(actions) do
+                    local ok, r = pcall(GET.InvokeServer, GET, svc, act)
+                    if ok and r ~= nil then
+                        hits = hits + 1
+                        print(string.format("  [%s/%s] type=%s value=%s", svc, act, type(r), tostring(r)))
+                        if type(r) == "table" then
+                            for k, v in pairs(r) do
+                                print(string.format("    %s = %s  (%s)", tostring(k), tostring(v), type(v)))
+                            end
+                        end
+                    end
+                end
+            end
+            if hits == 0 then print("  (no non-nil returns from any combo)") end
+        end
+
+        -- 4) ReplicatedStorage scan for Perk / Item rarity LUT modules
+        print("\n[RS Modules — perk/rarity/item candidates]")
+        local foundMods = 0
+        for _, d in ipairs(RS:GetDescendants()) do
+            local n = d.Name:lower()
+            if d:IsA("ModuleScript") and
+               (n:find("perk") or n:find("rarity") or n:find("item") or n:find("currenc")) then
+                print("  ", d:GetFullName())
+                foundMods = foundMods + 1
+            end
+        end
+        if foundMods == 0 then print("  (no matches)") end
+
+        -- 5) ReplicatedStorage.Assets top-level (find Perks / Items folders)
+        local assets = RS:FindFirstChild("Assets")
+        if assets then
+            print("\n[RS.Assets top-level]")
+            for _, c in ipairs(assets:GetChildren()) do
+                print(string.format("  %s: %s (%d children)", c.ClassName, c.Name, #c:GetChildren()))
+            end
+        end
+
+        print("\n========== END PROFILE DISCOVERY ==========\n")
+        Library:Notify("Profile discovery in console", 4)
+    end,
+})
+
 --------- Anti-AFK ---------
 LocalPlayer.Idled:Connect(function()
     if not Toggles.AntiAFK.Value then return end
