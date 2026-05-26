@@ -647,7 +647,10 @@ end
 getMoney = function()
     local lbl = resolveMoneyLabel()
     if not lbl then return lastKnownMoney end
-    local n = tonumber((lbl.Text or ""):gsub("[^%d]", ""))
+    -- gsub returns (string, count); wrap in parens to keep only the string,
+    -- otherwise tonumber sees count as the base arg and errors.
+    local cleaned = ((lbl.Text or ""):gsub("[^%d]", ""))
+    local n = tonumber(cleaned)
     if n then lastKnownMoney = n end
     return lastKnownMoney
 end
@@ -911,19 +914,27 @@ do
     local b = Instance.new("BindableEvent")
     b.Name   = SNIFF_BRIDGE
     b.Parent = CoreGui
+    local function deepPrint(t, indent, seen)
+        indent = indent or "   "
+        seen = seen or {}
+        if seen[t] then print(indent .. "<cyclic>") return end
+        seen[t] = true
+        for k, v in pairs(t) do
+            if type(v) == "table" then
+                print(indent .. tostring(k) .. " = {")
+                deepPrint(v, indent .. "    ", seen)
+                print(indent .. "}")
+            else
+                print(indent .. tostring(k) .. " = " .. tostring(v) .. "  (" .. type(v) .. ")")
+            end
+        end
+    end
     b.Event:Connect(function(data)
         if type(data) ~= "table" then return end
         print(string.format("[Sniff S_Rewards] action=%s arg3=%s returnType=%s",
             tostring(data.action), tostring(data.arg3), type(data.result)))
         if type(data.result) == "table" then
-            for k, v in pairs(data.result) do
-                print("   ", tostring(k), "=", tostring(v))
-                if type(v) == "table" then
-                    for k2, v2 in pairs(v) do
-                        print("       ", tostring(k2), "=", tostring(v2))
-                    end
-                end
-            end
+            deepPrint(data.result)
         else
             print("   value =", tostring(data.result))
         end
@@ -1418,15 +1429,27 @@ UtilBox:AddButton({
         local GET = getGET()
         if not GET then warn("[Dump] no GET remote") return end
 
+        local function dumpTable(t, indent, seen)
+            indent = indent or "   "
+            seen = seen or {}
+            if seen[t] then print(indent .. "<cyclic>") return end
+            seen[t] = true
+            for k, v in pairs(t) do
+                if type(v) == "table" then
+                    print(indent .. tostring(k) .. " = {")
+                    dumpTable(v, indent .. "    ", seen)
+                    print(indent .. "}")
+                else
+                    print(indent .. tostring(k) .. " = " .. tostring(v) .. "  (" .. type(v) .. ")")
+                end
+            end
+        end
+
         local function try(label, ...)
             local ok, r = pcall(GET.InvokeServer, GET, ...)
             print(string.format("[S_Rewards %-14s] ok=%s type=%s value=%s",
                 label, tostring(ok), type(r), tostring(r)))
-            if type(r) == "table" then
-                for k, v in pairs(r) do
-                    print("   ", tostring(k), "=", tostring(v))
-                end
-            end
+            if type(r) == "table" then dumpTable(r) end
         end
 
         try("Get true",      "S_Rewards", "Get", true)
