@@ -66,6 +66,12 @@ local postWebhook
 local sendMatchWebhook
 local getMoney
 
+-- Cache of the most recent S_Rewards table the Actor sniffer captured from
+-- the game's own polling. Read by sendMatchWebhook (so we don't have to
+-- fire the remote ourselves and lose the race). Written by the bridge
+-- handler inside the sniffer section.
+local latestRewardsCapture = nil  -- { ts = number, data = table } | nil
+
 --===========================================================
 -- Common helpers
 --===========================================================
@@ -935,6 +941,12 @@ do
             tostring(data.action), tostring(data.arg3), type(data.result)))
         if type(data.result) == "table" then
             deepPrint(data.result)
+            -- Cache the latest non-nil capture for the webhook so we don't
+            -- have to race the game's own polling loop. The game drains the
+            -- data on its first successful Get; subsequent main-thread calls
+            -- (ours) get nil. By listening passively we always have the real
+            -- table without firing anything ourselves.
+            latestRewardsCapture = { ts = tick(), data = data.result }
         else
             print("   value =", tostring(data.result))
         end
@@ -1293,10 +1305,25 @@ end)
 -- "Get All" returns identical data. "Get true/false/nil/plr/name/Last/Current"
 -- all return nil for us — server appears to whitelist specific action strings.
 
-local function fetchRewardsRemote()
+-- Returns the latest S_Rewards table captured by the Actor sniffer if it's
+-- fresh enough to belong to the current match. Falls back to non-consuming
+-- active variants if the sniffer hasn't caught anything yet. NEVER fires
+-- `("Get", true)` ourselves — that's what the game polls; calling it racing
+-- the game would either lose (we get nil) or worse, drain the buffer before
+-- the game does (game UI then shows blank rewards).
+local function fetchRewardsRemote(matchEdgeTime)
+    -- 1) Prefer the sniffer capture if it's after the match-end edge.
+    if latestRewardsCapture
+       and latestRewardsCapture.ts >= (matchEdgeTime or 0)
+       and type(latestRewardsCapture.data) == "table" then
+        return latestRewardsCapture.data
+    end
+    -- 2) Last-resort active fallback. Skip arg3=true (the game's slot).
     local GET = getGET(); if not GET then return nil end
-    local ok, result = pcall(GET.InvokeServer, GET, "S_Rewards", "Get", "Match")
-    if ok and type(result) == "table" then return result end
+    for _, arg in ipairs({ LocalPlayer, "Last", "Match", "All" }) do
+        local ok, r = pcall(GET.InvokeServer, GET, "S_Rewards", "Get", arg)
+        if ok and type(r) == "table" then return r end
+    end
     return nil
 end
 
@@ -1307,8 +1334,8 @@ local function fmtSeconds(s)
     return string.format("%02d:%02d", m, r)
 end
 
-sendMatchWebhook = function(matchNum)
-    local data  = fetchRewardsRemote()
+sendMatchWebhook = function(matchNum, edgeTime)
+    local data  = fetchRewardsRemote(edgeTime)
     local money = getMoney()
 
     local win, fields
@@ -1412,9 +1439,29 @@ task.spawn(function()
         local v = (r and r.Visible) or false
         if v and not lastRewardsVisible then
             -- Edge: match just ended (works for both win and death).
+            -- The game polls S_Rewards/Get for ~3 seconds before the server
+            -- has data ready. Stamp the edge time and let sendMatchWebhook
+            -- decide which sniffer capture is fresh enough.
+            local edgeTime = tick()
             matchCount = matchCount + 1
             if Toggles.WebhookEnabled and Toggles.WebhookEnabled.Value then
-                task.spawn(sendMatchWebhook, matchCount)
+                local n = matchCount
+                task.spawn(function()
+                    -- Wait up to 6s for the sniffer to receive a post-edge
+                    -- capture from the game's own polling. Bail early as
+                    -- soon as we have one.
+                    local waited = 0
+                    while waited < 6 do
+                        if latestRewardsCapture
+                           and latestRewardsCapture.ts >= edgeTime
+                           and type(latestRewardsCapture.data) == "table" then
+                            break
+                        end
+                        task.wait(0.25)
+                        waited = waited + 0.25
+                    end
+                    sendMatchWebhook(n, edgeTime)
+                end)
             end
         end
         lastRewardsVisible = v
