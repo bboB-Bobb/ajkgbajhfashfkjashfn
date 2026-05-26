@@ -312,17 +312,15 @@ MiscBox:AddButton({
     end,
 })
 
--- Lobby JobId captured from Roblox.GameLauncher.joinGameInstance; same
--- placeId/jobId pair the website uses for the AoT:R lobby instance.
+-- AoT:R lobby place. Plain Teleport (no JobId) so Roblox matchmakes us
+-- into any open lobby instance — the old hardcoded JobId went stale and
+-- popped a "Server is no longer available" error (code 771) before the
+-- internal fallback teleport actually succeeded.
 MiscBox:AddButton({
     Text = "Return to Lobby",
     Func = function()
         pcall(function()
-            game:GetService("TeleportService"):TeleportToPlaceInstance(
-                14916516914,
-                "a71dbaf1-06bc-4815-9cb2-fddf9ba88ff3",
-                LocalPlayer
-            )
+            game:GetService("TeleportService"):Teleport(14916516914, LocalPlayer)
         end)
     end,
 })
@@ -478,6 +476,28 @@ local function bumpGamesPlayed()
     local writer = writefile or (syn and syn.write_file) or (fluxus and fluxus.writefile)
     if writer then pcall(writer, GAMES_PLAYED_FILE, tostring(gamesPlayed)) end
 end
+
+--------- Shadow-ban auto-stop ---------
+-- Monitors LocalPlayer's Exploiter / Blacklisted attributes. If either
+-- flips true, immediately disables AutoKill (the riskiest feature) and
+-- pops a persistent notification. Run-once at script load + listens for
+-- attribute changes (game might set the flag mid-session).
+local function checkBanState()
+    local exploiter = LocalPlayer:GetAttribute("Exploiter")
+    local blacklist = LocalPlayer:GetAttribute("Blacklisted")
+    if exploiter == true or blacklist == true then
+        if Toggles.AutoKill then Toggles.AutoKill:SetValue(false) end
+        Library:Notify(string.format(
+            "SHADOW BANNED — AutoKill auto-disabled (Exploiter=%s, Blacklist=%s)",
+            tostring(exploiter), tostring(blacklist)
+        ), 10)
+        return true
+    end
+    return false
+end
+checkBanState()
+LocalPlayer:GetAttributeChangedSignal("Exploiter"):Connect(checkBanState)
+LocalPlayer:GetAttributeChangedSignal("Blacklisted"):Connect(checkBanState)
 
 --------- FOV ---------
 Options.FOV:OnChanged(function()
@@ -955,19 +975,55 @@ local refillingNow = false
 -- and get them server-dropped. Cleared when Rewards goes invisible.
 local mutedForRetry = false
 
--- Hover loop: runs on Heartbeat (every frame) so gravity never gets a chance
--- to pull you down between AutoKill ticks. Also zeroes velocity so a titan
--- swat can't fling you out of position.
-RunService.Heartbeat:Connect(function()
+-- Hover loop: smooth-steers the character toward the target each frame at
+-- a capped ODM-like speed instead of snapping with instant CFrame sets.
+-- Instant snapping + zeroed velocity is the classic teleport pattern that
+-- server-side anti-cheat / shadow-ban heuristics flag. Smooth motion looks
+-- like ODM gear gliding.
+--
+-- Three anti-flag tricks layered in:
+--   1. Per-frame Lerp at MOVE_SPEED studs/sec (no instant jumps)
+--   2. Y-jitter reseeded per target (not pixel-perfect every frame)
+--   3. Only zero velocity when parked, not while traveling (lets the
+--      physics engine see consistent momentum during travel)
+local MOVE_SPEED     = 90   -- studs/sec; tune up/down for risk vs speed
+local Y_JITTER       = 5    -- ±5 studs hover-height variance per target
+local jitterOffsetY  = 0
+local lastSeenTarget = nil
+
+RunService.Heartbeat:Connect(function(dt)
     if not Toggles.AutoKill.Value then return end
     if mutedForRetry then return end
     if not Toggles.TPAboveTitan.Value then return end
     if not currentTarget or not currentTarget.Parent then return end
     local nape = getTitanNape(currentTarget); if not nape then return end
     local root = getRoot(); if not root then return end
-    root.CFrame    = CFrame.new(nape.Position + Vector3.new(0, Options.TPHeight.Value, 0))
-    root.Velocity  = Vector3.zero
-    root.RotVelocity = Vector3.zero
+
+    -- Reseed jitter only when target changes; otherwise hover height is
+    -- stable per titan (no jittering every frame, which itself would look
+    -- weird/flaggable).
+    if currentTarget ~= lastSeenTarget then
+        jitterOffsetY  = (math.random() * 2 - 1) * Y_JITTER
+        lastSeenTarget = currentTarget
+    end
+
+    local targetPos = nape.Position + Vector3.new(0, Options.TPHeight.Value + jitterOffsetY, 0)
+    local toTarget  = targetPos - root.Position
+    local distance  = toTarget.Magnitude
+    if distance < 0.1 then return end
+
+    local maxStep = MOVE_SPEED * dt
+    local stepLen = math.min(maxStep, distance)
+    local newPos  = root.Position + toTarget.Unit * stepLen
+
+    -- Preserve current rotation; CFrame.new(pos) * rot keeps orientation.
+    root.CFrame = CFrame.new(newPos) * root.CFrame.Rotation
+
+    -- Park brake: only zero velocity once we're hovering in place. While
+    -- traveling, let physics show real momentum.
+    if distance < 5 then
+        root.AssemblyLinearVelocity = Vector3.zero
+    end
 end)
 
 task.spawn(function()
