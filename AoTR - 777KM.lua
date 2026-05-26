@@ -72,6 +72,14 @@ local getGold
 -- handler inside the sniffer section.
 local latestRewardsCapture = nil  -- { ts = number, data = table } | nil
 
+-- Cache of the most recent GET("Data","Copy") table — the FULL player
+-- profile (currencies, stats, slots, perks storage, settings, quests).
+-- The remote is at result.Slots[Current_Slot].Currency.{Gold,Gems,...}.
+-- Refreshed both passively (Actor sniffer catches the game's own polls)
+-- and actively (background poll every 30s). Lets us read currencies
+-- anywhere — no lobby UI dependency. Confirmed via Sniff log 2026-05-27.
+local latestPlayerData = nil  -- { ts = number, data = table } | nil
+
 -- Built once at script load by requiring RS.Modules.Storage.Perks. Maps
 -- perk name -> rarity ("Common"/"Rare"/"Epic"/"Legendary"/"Mythic").
 -- Used in the webhook embed so each obtained perk is tagged with rarity.
@@ -697,6 +705,18 @@ local function resolveGemsLabel()
 end
 
 local function getGems()
+    -- Primary: read from cached Data/Copy profile (works mid-match).
+    if latestPlayerData and type(latestPlayerData.data) == "table" then
+        local slots = latestPlayerData.data.Slots
+        local cur   = latestPlayerData.data.Current_Slot
+        local slot  = slots and cur and slots[cur]
+        local g     = slot and slot.Currency and slot.Currency.Gems
+        if type(g) == "number" then
+            lastKnownGems = g
+            return g
+        end
+    end
+    -- Fallback: lobby Topbar label (only resolves in lobby).
     local lbl = resolveGemsLabel()
     if not lbl then return lastKnownGems end
     local cleaned = ((lbl.Text or ""):gsub("[^%d]", ""))
@@ -720,6 +740,19 @@ local function resolveGoldLabel()
 end
 
 getGold = function()
+    -- Primary: read from cached Data/Copy profile (authoritative server
+    -- value, refreshed by sniffer + 30s active poll). Works mid-match.
+    if latestPlayerData and type(latestPlayerData.data) == "table" then
+        local slots = latestPlayerData.data.Slots
+        local cur   = latestPlayerData.data.Current_Slot
+        local slot  = slots and cur and slots[cur]
+        local g     = slot and slot.Currency and slot.Currency.Gold
+        if type(g) == "number" then
+            lastKnownGold = g
+            return g
+        end
+    end
+    -- Fallback: lobby Topbar label (only resolves in lobby).
     local lbl = resolveGoldLabel()
     if not lbl then return lastKnownGold end
     -- gsub returns (string, count); wrap in parens to keep only the string,
@@ -738,6 +771,28 @@ task.spawn(function()
             pcall(function() GoldLabel:SetText(txt) end)
         end
         task.wait(0.5)
+    end
+end)
+
+-- Active Data/Copy poller: refresh the profile cache every 30s so the
+-- webhook + UI always have a fresh Gold/Gems value. The game polls this
+-- remote on its own at various trigger points (lobby entry, after saves);
+-- this loop just ensures we're never stale by more than 30 seconds.
+-- First call runs immediately to seed the cache at script load.
+-- (Inlines the GET lookup instead of calling getGET(), which is declared
+-- later in the file.)
+task.spawn(function()
+    while not Library.Unloaded do
+        local assets  = RS:FindFirstChild("Assets")
+        local remotes = assets and assets:FindFirstChild("Remotes")
+        local GET     = remotes and remotes:FindFirstChild("GET")
+        if GET then
+            local ok, result = pcall(GET.InvokeServer, GET, "Data", "Copy")
+            if ok and type(result) == "table" then
+                latestPlayerData = { ts = tick(), data = result }
+            end
+        end
+        task.wait(30)
     end
 end)
 
@@ -1094,6 +1149,12 @@ do
                 sp("   value = " .. tostring(data.result))
             end
             return
+        end
+        -- Data/Copy is the full player profile. Cache it for getGold/getGems/
+        -- webhook Total fields. Game polls this on lobby entry + after saves.
+        if data.service == "Data" and data.action == "Copy" and type(data.result) == "table" then
+            latestPlayerData = { ts = tick(), data = data.result }
+            -- Fall through so it still logs in the discovery section below.
         end
         -- Every other unique call (deduped at actor side) — discovery log.
         -- Tag with the remote name so we can tell GET vs GET_2 (the per-
@@ -1650,10 +1711,10 @@ task.spawn(function()
         if v ~= lastRewardsVisible then
             if v then
                 -- Match just ended (Rewards visible — works for win + death).
-                -- One task per match handles BOTH gold/gems accumulation
-                -- (always) AND the webhook send (if enabled). Doing the
-                -- accumulation before the webhook fires guarantees the
-                -- embed sees the updated Total values, no race.
+                -- Wait for the S_Rewards sniffer capture, then fire the
+                -- webhook. Gold/Gems no longer needs accumulation — the
+                -- Data/Copy poll (separate 30s loop) keeps the profile
+                -- cache fresh with the authoritative server value.
                 matchCount = matchCount + 1
                 local n = matchCount
                 task.spawn(function()
@@ -1668,19 +1729,16 @@ task.spawn(function()
                         waited = waited + 0.25
                     end
 
-                    -- Accumulate Gold/Gems onto the lobby-seeded cache so
-                    -- mid-session values stay fresh until next lobby visit
-                    -- corrects any drift. Skip if no lobby baseline yet
-                    -- (cache stays nil → embed shows "?" honestly).
-                    if latestRewardsCapture
-                       and type(latestRewardsCapture.data) == "table" then
-                        local o = latestRewardsCapture.data.Obtained
-                        if type(o) == "table" then
-                            if type(o.Gold) == "number" and lastKnownGold then
-                                lastKnownGold = lastKnownGold + o.Gold
-                            end
-                            if type(o.Gems) == "number" and lastKnownGems then
-                                lastKnownGems = lastKnownGems + o.Gems
+                    -- Trigger a fresh Data/Copy poll so the embed shows
+                    -- post-match Gold/Gems (server saves after Rewards).
+                    do
+                        local assets  = RS:FindFirstChild("Assets")
+                        local remotes = assets and assets:FindFirstChild("Remotes")
+                        local GET     = remotes and remotes:FindFirstChild("GET")
+                        if GET then
+                            local ok, result = pcall(GET.InvokeServer, GET, "Data", "Copy")
+                            if ok and type(result) == "table" then
+                                latestPlayerData = { ts = tick(), data = result }
                             end
                         end
                     end
