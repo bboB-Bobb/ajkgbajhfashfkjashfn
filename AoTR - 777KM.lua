@@ -1076,7 +1076,7 @@ local sniffHookSrc = ([[
             -- nil->table transitions (e.g. S_Rewards polling) fire on both.
             -- Use concatenation (NOT string.format) so the outer
             -- :format(SNIFF_BRIDGE) on this whole source block doesn't try
-            -- to consume our %s placeholders.
+            -- to consume any percent-s style placeholders.
             local key = tostring(args[1]) .. ":" .. tostring(args[2]) .. ":" .. type(returnVal)
             if not seenCalls[key] then
                 seenCalls[key] = true
