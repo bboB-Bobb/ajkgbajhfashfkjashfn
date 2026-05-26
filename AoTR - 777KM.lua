@@ -64,7 +64,7 @@ local Tabs = {
 -- see the assigned function bodies.
 local postWebhook
 local sendMatchWebhook
-local getMoney
+local getGold
 
 -- Cache of the most recent S_Rewards table the Actor sniffer captured from
 -- the game's own polling. Read by sendMatchWebhook (so we don't have to
@@ -160,7 +160,7 @@ CombatBox:AddSlider("MultiHitCount", {
 })
 
 local TitanCountLabel = CombatBox:AddLabel("Titans: 0", true)
-local MoneyLabel      = CombatBox:AddLabel("Money: ?",  true)
+local GoldLabel      = CombatBox:AddLabel("Gold: ?",   true)
 
 local NapeBox = Tabs.Combat:AddRightGroupbox("Nape", "target")
 
@@ -607,12 +607,12 @@ end)
 --------- Money read (lobby UI label; nil during matches) ---------
 -- Hardcoded PlayerGui path is filled in once the user runs the "Spy Money
 -- Path" debug button in the lobby and pastes the result back. Until then,
--- the label and webhook show "?". `lastKnownMoney` caches the most recent
+-- the label and webhook show "?". `lastKnownGold` caches the most recent
 -- read so the webhook still carries a value even after the lobby UI tears
 -- down at match start (the label inside the lobby panel is unparented mid-
 -- match in many Roblox games).
-local cachedMoneyLabel = nil
-local lastKnownMoney   = nil
+local cachedGoldLabel = nil
+local lastKnownGold   = nil
 
 -- Edit this list once you know the real path. Each entry is a function that
 -- walks PlayerGui from a likely starting point and returns a TextLabel/TextBox.
@@ -669,36 +669,36 @@ local function getGems()
 end
 LocalPlayer.CharacterAdded:Connect(function() cachedGemsLabel = nil end)
 
-local function resolveMoneyLabel()
-    if cachedMoneyLabel and cachedMoneyLabel.Parent then return cachedMoneyLabel end
-    cachedMoneyLabel = nil
+local function resolveGoldLabel()
+    if cachedGoldLabel and cachedGoldLabel.Parent then return cachedGoldLabel end
+    cachedGoldLabel = nil
     for _, fn in ipairs(moneyPathCandidates) do
         local ok, result = pcall(fn)
         if ok and result and (result:IsA("TextLabel") or result:IsA("TextBox")) then
-            cachedMoneyLabel = result
+            cachedGoldLabel = result
             return result
         end
     end
     return nil
 end
 
-getMoney = function()
-    local lbl = resolveMoneyLabel()
-    if not lbl then return lastKnownMoney end
+getGold = function()
+    local lbl = resolveGoldLabel()
+    if not lbl then return lastKnownGold end
     -- gsub returns (string, count); wrap in parens to keep only the string,
     -- otherwise tonumber sees count as the base arg and errors.
     local cleaned = ((lbl.Text or ""):gsub("[^%d]", ""))
     local n = tonumber(cleaned)
-    if n then lastKnownMoney = n end
-    return lastKnownMoney
+    if n then lastKnownGold = n end
+    return lastKnownGold
 end
 
 task.spawn(function()
     while not Library.Unloaded do
-        if MoneyLabel and MoneyLabel.SetText then
-            local m = getMoney()
-            local txt = m and ("Money: " .. tostring(m)) or "Money: ?"
-            pcall(function() MoneyLabel:SetText(txt) end)
+        if GoldLabel and GoldLabel.SetText then
+            local m = getGold()
+            local txt = m and ("Gold: " .. tostring(m)) or "Gold: ?"
+            pcall(function() GoldLabel:SetText(txt) end)
         end
         task.wait(0.5)
     end
@@ -1395,7 +1395,7 @@ end
 
 sendMatchWebhook = function(matchNum)
     local data  = fetchRewardsRemote()
-    local money = getMoney()
+    local money = getGold()
     local gems  = getGems()
     local level   = LocalPlayer:GetAttribute("Level")
     local streak  = LocalPlayer:GetAttribute("Streak")
@@ -1520,26 +1520,45 @@ task.spawn(function()
         if v ~= lastRewardsVisible then
             if v then
                 -- Match just ended (Rewards visible — works for win + death).
-                -- The game might already have polled S_Rewards before this
-                -- flip (server has data ready before the UI fades in), so
-                -- the cache could be populated already. Otherwise wait a
-                -- few ticks for it to arrive.
+                -- One task per match handles BOTH gold/gems accumulation
+                -- (always) AND the webhook send (if enabled). Doing the
+                -- accumulation before the webhook fires guarantees the
+                -- embed sees the updated Total values, no race.
                 matchCount = matchCount + 1
-                if Toggles.WebhookEnabled and Toggles.WebhookEnabled.Value then
-                    local n = matchCount
-                    task.spawn(function()
-                        local waited = 0
-                        while waited < 6 do
-                            if latestRewardsCapture
-                               and type(latestRewardsCapture.data) == "table" then
-                                break
-                            end
-                            task.wait(0.25)
-                            waited = waited + 0.25
+                local n = matchCount
+                task.spawn(function()
+                    -- Wait for sniffer capture (up to 6s after match end)
+                    local waited = 0
+                    while waited < 6 do
+                        if latestRewardsCapture
+                           and type(latestRewardsCapture.data) == "table" then
+                            break
                         end
+                        task.wait(0.25)
+                        waited = waited + 0.25
+                    end
+
+                    -- Accumulate Gold/Gems onto the lobby-seeded cache so
+                    -- mid-session values stay fresh until next lobby visit
+                    -- corrects any drift. Skip if no lobby baseline yet
+                    -- (cache stays nil → embed shows "?" honestly).
+                    if latestRewardsCapture
+                       and type(latestRewardsCapture.data) == "table" then
+                        local o = latestRewardsCapture.data.Obtained
+                        if type(o) == "table" then
+                            if type(o.Gold) == "number" and lastKnownGold then
+                                lastKnownGold = lastKnownGold + o.Gold
+                            end
+                            if type(o.Gems) == "number" and lastKnownGems then
+                                lastKnownGems = lastKnownGems + o.Gems
+                            end
+                        end
+                    end
+
+                    if Toggles.WebhookEnabled and Toggles.WebhookEnabled.Value then
                         sendMatchWebhook(n)
-                    end)
-                end
+                    end
+                end)
             else
                 -- Rewards screen closed (new mission starting) — drop the
                 -- cache so next match's webhook can't accidentally reuse it.
