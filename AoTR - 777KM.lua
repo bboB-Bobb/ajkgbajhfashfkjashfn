@@ -317,7 +317,7 @@ MiscBox:AddButton({
     Text = "Check Shadow Banned",
     Func = function()
         local exploiter = LocalPlayer:GetAttribute("Exploiter")
-        local blacklist = LocalPlayer:GetAttribute("Blacklist")
+        local blacklist = LocalPlayer:GetAttribute("Blacklisted")
         local flagged = exploiter == true or blacklist == true
         if flagged then
             Library:Notify(string.format(
@@ -399,6 +399,43 @@ postWebhook = function(payload)
         return false, "HTTP " .. tostring(status)
     end
     return true
+end
+
+--------- Debug-dump sink (collect output + save to .txt) ---------
+-- Discovery buttons can output hundreds of lines that overflow the executor
+-- console history. Wrap each button with newDumpSink() to get a `p` function
+-- (use in place of print — writes to both console AND a buffer) and a
+-- `flush(filename)` to write the buffer to a file in the executor's
+-- workspace folder for review in a text editor.
+local function newDumpSink()
+    local buf = {}
+    local function p(...)
+        local n = select("#", ...)
+        local parts = {}
+        for i = 1, n do
+            parts[i] = tostring((select(i, ...)))
+        end
+        local line = table.concat(parts, " ")
+        print(line)
+        buf[#buf + 1] = line
+    end
+    local function flush(filename)
+        local writer = writefile
+                    or (syn and syn.write_file)
+                    or (fluxus and fluxus.writefile)
+        if writer then
+            local ok, err = pcall(writer, filename, table.concat(buf, "\n"))
+            if ok then
+                Library:Notify(string.format("Saved %d lines -> %s", #buf, filename), 5)
+                return
+            else
+                Library:Notify("writefile failed: " .. tostring(err), 5)
+                return
+            end
+        end
+        Library:Notify("Executor has no writefile API", 5)
+    end
+    return p, flush
 end
 
 --------- FOV ---------
@@ -1626,26 +1663,27 @@ UtilBox:AddButton({
     Func = function()
         local GET = getGET()
         if not GET then warn("[Dump] no GET remote") return end
+        local p, flush = newDumpSink()
 
         local function dumpTable(t, indent, seen)
             indent = indent or "   "
             seen = seen or {}
-            if seen[t] then print(indent .. "<cyclic>") return end
+            if seen[t] then p(indent .. "<cyclic>") return end
             seen[t] = true
             for k, v in pairs(t) do
                 if type(v) == "table" then
-                    print(indent .. tostring(k) .. " = {")
+                    p(indent .. tostring(k) .. " = {")
                     dumpTable(v, indent .. "    ", seen)
-                    print(indent .. "}")
+                    p(indent .. "}")
                 else
-                    print(indent .. tostring(k) .. " = " .. tostring(v) .. "  (" .. type(v) .. ")")
+                    p(indent .. tostring(k) .. " = " .. tostring(v) .. "  (" .. type(v) .. ")")
                 end
             end
         end
 
         local function try(label, ...)
             local ok, r = pcall(GET.InvokeServer, GET, ...)
-            print(string.format("[S_Rewards %-14s] ok=%s type=%s value=%s",
+            p(string.format("[S_Rewards %-14s] ok=%s type=%s value=%s",
                 label, tostring(ok), type(r), tostring(r)))
             if type(r) == "table" then dumpTable(r) end
         end
@@ -1664,7 +1702,7 @@ UtilBox:AddButton({
         try("Fetch",         "S_Rewards", "Fetch")
         try("Claim",         "S_Rewards", "Claim")
 
-        Library:Notify("S_Rewards dump in console", 3)
+        flush("AOTR_Dump_S_Rewards.txt")
     end,
 })
 
@@ -1673,6 +1711,7 @@ UtilBox:AddButton({
     Func = function()
         local pg = LocalPlayer:FindFirstChild("PlayerGui")
         if not pg then warn("[Spy] no PlayerGui") return end
+        local p, flush = newDumpSink()
         local count = 0
         for _, d in ipairs(pg:GetDescendants()) do
             if (d:IsA("TextLabel") or d:IsA("TextBox")) then
@@ -1681,11 +1720,12 @@ UtilBox:AddButton({
                 -- and sometimes a "$" / "K" / "M" suffix.
                 if t:match("^[%d,]+$") or t:match("^%$?[%d,]+[KM]?$") then
                     count = count + 1
-                    print(string.format("[Money?] %s = %q", d:GetFullName(), t))
+                    p(string.format("[Money?] %s = %q", d:GetFullName(), t))
                 end
             end
         end
-        Library:Notify(string.format("Spy: %d candidate labels in console", count), 4)
+        p(string.format("\n-- %d candidate labels found --", count))
+        flush("AOTR_Spy_Money_Path.txt")
     end,
 })
 
@@ -1701,25 +1741,26 @@ UtilBox:AddButton({
             return
         end
 
+        local p, flush = newDumpSink()
         local function deep(t, indent, seen)
             indent = indent or "   "
             seen = seen or {}
-            if seen[t] then print(indent .. "<cyclic>") return end
+            if seen[t] then p(indent .. "<cyclic>") return end
             seen[t] = true
             for k, v in pairs(t) do
                 if type(v) == "table" then
-                    print(indent .. tostring(k) .. " = {")
+                    p(indent .. tostring(k) .. " = {")
                     deep(v, indent .. "  ", seen)
-                    print(indent .. "}")
+                    p(indent .. "}")
                 else
-                    print(indent .. tostring(k) .. " = " .. tostring(v) .. "  (" .. type(v) .. ")")
+                    p(indent .. tostring(k) .. " = " .. tostring(v) .. "  (" .. type(v) .. ")")
                 end
             end
         end
 
         local function try(label, ...)
             local ok, r = pcall(g2.InvokeServer, g2, ...)
-            print(string.format("[GET_2 %-18s] ok=%s type=%s value=%s",
+            p(string.format("[GET_2 %-18s] ok=%s type=%s value=%s",
                 label, tostring(ok), type(r), tostring(r)))
             if type(r) == "table" then deep(r) end
         end
@@ -1741,7 +1782,7 @@ UtilBox:AddButton({
         try("S_Rewards/Get true","S_Rewards", "Get", true)
         try("S_Rewards/Get All", "S_Rewards", "Get", "All")
 
-        Library:Notify("GET_2 probe dumped to console", 4)
+        flush("AOTR_GET2_Probe.txt")
     end,
 })
 
@@ -1751,12 +1792,13 @@ UtilBox:AddButton({
         local assets = RS:FindFirstChild("Assets")
         local remotes = assets and assets:FindFirstChild("Remotes")
         if not remotes then warn("[Remotes] folder not found") return end
-        print("\n========== REMOTES FOLDER ==========\n")
+        local p, flush = newDumpSink()
+        p("\n========== REMOTES FOLDER ==========\n")
         for _, c in ipairs(remotes:GetChildren()) do
-            print(string.format("  %s: %s", c.ClassName, c.Name))
+            p(string.format("  %s: %s", c.ClassName, c.Name))
         end
-        print("\n========== END ==========\n")
-        Library:Notify("Remotes folder dumped to console", 3)
+        p("\n========== END ==========\n")
+        flush("AOTR_Remotes_Folder.txt")
     end,
 })
 
@@ -1770,14 +1812,15 @@ UtilBox:AddButton({
             warn("[Probe] Stats.Get not available:", statsMod)
             return
         end
+        local p, flush = newDumpSink()
 
         local function try(label, ...)
             local oks, r = pcall(statsMod.Get, ...)
-            print(string.format("[Stats.Get(%s)] ok=%s type=%s value=%s",
+            p(string.format("[Stats.Get(%s)] ok=%s type=%s value=%s",
                 label, tostring(oks), type(r), tostring(r)))
             if type(r) == "table" then
                 for k, v in pairs(r) do
-                    print(string.format("    %s = %s  (%s)", tostring(k), tostring(v), type(v)))
+                    p(string.format("    %s = %s  (%s)", tostring(k), tostring(v), type(v)))
                 end
             end
         end
@@ -1794,7 +1837,7 @@ UtilBox:AddButton({
         try("LP,'All'", LocalPlayer, "All")
         try("LP.Name,'Gold'", LocalPlayer.Name, "Gold")
 
-        Library:Notify("Stats.Get probe done — check console", 4)
+        flush("AOTR_Probe_Stats_Get.txt")
     end,
 })
 
@@ -1803,7 +1846,8 @@ UtilBox:AddButton({
     Func = function()
         local pg = LocalPlayer:FindFirstChild("PlayerGui")
         if not pg then warn("[Spy] no PlayerGui") return end
-        print("\n========== LOBBY UI SCAN ==========\n")
+        local p, flush = newDumpSink()
+        p("\n========== LOBBY UI SCAN ==========\n")
         local hits = 0
         local keywords = { "gold", "gem", "level", "prestige", "money", "currency",
                            "candy", "shard", "cash", "balance", "coin", "stat" }
@@ -1817,37 +1861,38 @@ UtilBox:AddButton({
                 end
                 if matched then
                     local parentName = d.Parent and d.Parent.Name or "?"
-                    print(string.format("  %s  parent=%s  text=%q",
+                    p(string.format("  %s  parent=%s  text=%q",
                         d:GetFullName(), parentName, d.Text or ""))
                     hits = hits + 1
                 end
             end
         end
-        print(string.format("\n========== %d matches ==========\n", hits))
-        Library:Notify(string.format("Lobby UI: %d candidates in console", hits), 4)
+        p(string.format("\n========== %d matches ==========\n", hits))
+        flush("AOTR_Spy_Lobby_UI.txt")
     end,
 })
 
 UtilBox:AddButton({
     Text = "Dump Perks + Stats",
     Func = function()
+        local p, flush = newDumpSink()
         local function deep(t, indent, seen, depthLimit, depth)
             indent = indent or "  "
             seen = seen or {}
             depthLimit = depthLimit or 4
             depth = depth or 0
-            if seen[t] then print(indent .. "<cyclic>") return end
-            if depth > depthLimit then print(indent .. "<max depth>") return end
+            if seen[t] then p(indent .. "<cyclic>") return end
+            if depth > depthLimit then p(indent .. "<max depth>") return end
             seen[t] = true
             for k, v in pairs(t) do
                 if type(v) == "table" then
-                    print(indent .. tostring(k) .. " = {")
+                    p(indent .. tostring(k) .. " = {")
                     deep(v, indent .. "  ", seen, depthLimit, depth + 1)
-                    print(indent .. "}")
+                    p(indent .. "}")
                 elseif type(v) == "function" then
-                    print(indent .. tostring(k) .. " = <fn>")
+                    p(indent .. tostring(k) .. " = <fn>")
                 else
-                    print(indent .. tostring(k) .. " = " .. tostring(v) .. "  (" .. type(v) .. ")")
+                    p(indent .. tostring(k) .. " = " .. tostring(v) .. "  (" .. type(v) .. ")")
                 end
             end
         end
@@ -1863,49 +1908,47 @@ UtilBox:AddButton({
             return m
         end
 
-        print("\n=========== PERKS MODULE ===========")
+        p("\n=========== PERKS MODULE ===========")
         local perks, err = tryRequire({"Modules", "Storage", "Perks"})
-        if perks then deep(perks) else print("ERR:", err) end
+        if perks then deep(perks) else p("ERR: " .. tostring(err)) end
 
-        print("\n=========== STATS MODULE ===========")
+        p("\n=========== STATS MODULE ===========")
         local stats, err2 = tryRequire({"Modules", "Utilities", "Stats"})
-        if stats then deep(stats, "  ", nil, 3) else print("ERR:", err2) end
+        if stats then deep(stats, "  ", nil, 3) else p("ERR: " .. tostring(err2)) end
 
-        Library:Notify("Perks + Stats dumped to console", 4)
+        flush("AOTR_Perks_Stats.txt")
     end,
 })
 
 UtilBox:AddButton({
     Text = "Discover Profile",
     Func = function()
-        print("\n========== PROFILE DISCOVERY ==========\n")
+        local p, flush = newDumpSink()
+        p("\n========== PROFILE DISCOVERY ==========\n")
 
-        -- 1) LocalPlayer attributes (likely place for Gold/Gems/Level/Prestige)
-        print("[LocalPlayer Attributes]")
+        p("[LocalPlayer Attributes]")
         local attrCount = 0
         for k, v in pairs(LocalPlayer:GetAttributes()) do
-            print(string.format("  %s = %s  (%s)", tostring(k), tostring(v), type(v)))
+            p(string.format("  %s = %s  (%s)", tostring(k), tostring(v), type(v)))
             attrCount = attrCount + 1
         end
-        if attrCount == 0 then print("  (none)") end
+        if attrCount == 0 then p("  (none)") end
 
-        -- 2) LocalPlayer children (Data folders / leaderstats / Configuration / Profile)
-        print("\n[LocalPlayer Children]")
+        p("\n[LocalPlayer Children]")
         for _, c in ipairs(LocalPlayer:GetChildren()) do
-            print(string.format("  %s: %s", c.ClassName, c.Name))
+            p(string.format("  %s: %s", c.ClassName, c.Name))
             if c:IsA("Folder") or c:IsA("Configuration") then
                 for _, cc in ipairs(c:GetDescendants()) do
                     local val = ""
                     if cc:IsA("ValueBase") then val = " = " .. tostring(cc.Value) end
-                    print(string.format("    %s: %s%s", cc.ClassName, cc.Name, val))
+                    p(string.format("    %s: %s%s", cc.ClassName, cc.Name, val))
                 end
             end
         end
 
-        -- 3) Profile-style remote probes (try every plausible service+action combo)
         local GET = getGET()
         if GET then
-            print("\n[Profile Remote Probes — non-nil hits only]")
+            p("\n[Profile Remote Probes - non-nil hits only]")
             local services = {
                 "S_Player", "S_Profile", "S_Data", "S_Currency", "S_Stats",
                 "S_Account", "S_Inventory", "S_Save", "S_Save_Profile", "Profile",
@@ -1918,20 +1961,19 @@ UtilBox:AddButton({
                     local ok, r = pcall(GET.InvokeServer, GET, svc, act)
                     if ok and r ~= nil then
                         hits = hits + 1
-                        print(string.format("  [%s/%s] type=%s value=%s", svc, act, type(r), tostring(r)))
+                        p(string.format("  [%s/%s] type=%s value=%s", svc, act, type(r), tostring(r)))
                         if type(r) == "table" then
                             for k, v in pairs(r) do
-                                print(string.format("    %s = %s  (%s)", tostring(k), tostring(v), type(v)))
+                                p(string.format("    %s = %s  (%s)", tostring(k), tostring(v), type(v)))
                             end
                         end
                     end
                 end
             end
-            if hits == 0 then print("  (no non-nil returns from any combo)") end
+            if hits == 0 then p("  (no non-nil returns from any combo)") end
         end
 
-        -- 4) ReplicatedStorage scan for Perk / Item rarity LUT modules
-        print("\n[RS Modules — perk/rarity/item/profile candidates]")
+        p("\n[RS Modules - perk/rarity/item/profile candidates]")
         local moduleCandidates = {}
         for _, d in ipairs(RS:GetDescendants()) do
             local n = d.Name:lower()
@@ -1940,14 +1982,13 @@ UtilBox:AddButton({
                 or n:find("currenc") or n:find("profile") or n:find("data")
                 or n:find("save") or n:find("player") or n:find("stat")
                 or n:find("gold") or n:find("gem")) then
-                print("  ", d:GetFullName())
+                p("  " .. d:GetFullName())
                 moduleCandidates[#moduleCandidates + 1] = d
             end
         end
-        if #moduleCandidates == 0 then print("  (no matches)") end
+        if #moduleCandidates == 0 then p("  (no matches)") end
 
-        -- 5) Try require()ing each candidate module and dump top-level keys
-        print("\n[Module Requires — top-level keys]")
+        p("\n[Module Requires - top-level keys]")
         for _, mod in ipairs(moduleCandidates) do
             local ok, val = pcall(require, mod)
             if ok and type(val) == "table" then
@@ -1959,51 +2000,48 @@ UtilBox:AddButton({
                         sample[#sample + 1] = string.format("%s=%s", tostring(k), vs)
                     end
                 end
-                print(string.format("  %s -> table, %d keys: %s",
+                p(string.format("  %s -> table, %d keys: %s",
                     mod.Name, keyCount, table.concat(sample, ", ")))
             elseif ok then
-                print(string.format("  %s -> %s = %s", mod.Name, type(val), tostring(val)))
+                p(string.format("  %s -> %s = %s", mod.Name, type(val), tostring(val)))
             else
-                print(string.format("  %s -> require ERR: %s", mod.Name, tostring(val)))
+                p(string.format("  %s -> require ERR: %s", mod.Name, tostring(val)))
             end
         end
 
-        -- 6) ReplicatedStorage.Assets top-level (find Perks / Items folders)
         local assets = RS:FindFirstChild("Assets")
         if assets then
-            print("\n[RS.Assets top-level]")
+            p("\n[RS.Assets top-level]")
             for _, c in ipairs(assets:GetChildren()) do
-                print(string.format("  %s: %s (%d children)", c.ClassName, c.Name, #c:GetChildren()))
+                p(string.format("  %s: %s (%d children)", c.ClassName, c.Name, #c:GetChildren()))
             end
             local rarities = assets:FindFirstChild("Rarities")
             if rarities then
-                print("\n[RS.Assets.Rarities children]")
+                p("\n[RS.Assets.Rarities children]")
                 for _, c in ipairs(rarities:GetChildren()) do
-                    print("  ", c.ClassName, c.Name)
+                    p("  " .. c.ClassName .. " " .. c.Name)
                 end
             end
         end
 
-        -- 7) Deep PlayerScripts scan — sometimes the client mirrors state here
         local ps = LocalPlayer:FindFirstChild("PlayerScripts")
         if ps then
-            print("\n[PlayerScripts top-level]")
+            p("\n[PlayerScripts top-level]")
             for _, c in ipairs(ps:GetChildren()) do
-                print(string.format("  %s: %s", c.ClassName, c.Name))
+                p(string.format("  %s: %s", c.ClassName, c.Name))
             end
         end
 
-        -- 8) Workspace top-level + any folder named like player data
-        print("\n[Workspace folders matching player/data/profile]")
+        p("\n[Workspace folders matching player/data/profile]")
         for _, c in ipairs(workspace:GetChildren()) do
             local n = c.Name:lower()
             if c:IsA("Folder") and (n:find("player") or n:find("data") or n:find("profile")) then
-                print(string.format("  %s: %s (%d children)", c.ClassName, c.Name, #c:GetChildren()))
+                p(string.format("  %s: %s (%d children)", c.ClassName, c.Name, #c:GetChildren()))
             end
         end
 
-        print("\n========== END PROFILE DISCOVERY ==========\n")
-        Library:Notify("Profile discovery in console", 4)
+        p("\n========== END PROFILE DISCOVERY ==========\n")
+        flush("AOTR_Discover_Profile.txt")
     end,
 })
 
