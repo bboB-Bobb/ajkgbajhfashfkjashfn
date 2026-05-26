@@ -1707,11 +1707,20 @@ end
 
 local matchCount         = 0
 local lastRewardsVisible = false
--- Captured at the match-end edge from `workspace:GetAttribute("Seconds")`,
--- which is the game's own elapsed-seconds counter for the mission. The
--- server returns Seconds=0 inside S_Rewards (useless), so we read this
--- attribute directly at edge time when it still holds the final value.
-local lastMatchSeconds = nil
+-- The server returns Seconds=0 inside S_Rewards (useless). The game's own
+-- elapsed-seconds counter is workspace.Seconds, but it RESETS to 0 between
+-- missions — so reading it at the match-end edge often returns 0 because
+-- the reset already happened. Solution: track the peak value continuously
+-- via the attribute-changed signal, and snapshot it when Rewards appears.
+local lastMatchSeconds   = nil
+local missionPeakSeconds = 0
+
+Workspace:GetAttributeChangedSignal("Seconds"):Connect(function()
+    local s = Workspace:GetAttribute("Seconds")
+    if type(s) == "number" and s > missionPeakSeconds then
+        missionPeakSeconds = s
+    end
+end)
 task.spawn(function()
     while not Library.Unloaded do
         local r = getRewardsFrame()
@@ -1723,9 +1732,17 @@ task.spawn(function()
                 -- webhook. Gold/Gems no longer needs accumulation — the
                 -- Data/Copy poll (separate 30s loop) keeps the profile
                 -- cache fresh with the authoritative server value.
-                local secondsAttr = Workspace:GetAttribute("Seconds")
-                if type(secondsAttr) == "number" then
-                    lastMatchSeconds = secondsAttr
+                -- Use the peak workspace.Seconds value seen during the
+                -- mission (the attribute may have already reset to 0 by
+                -- the time we sample). Fallback to live value if peak is
+                -- still 0 (e.g. script loaded mid-match-end).
+                if missionPeakSeconds > 0 then
+                    lastMatchSeconds = missionPeakSeconds
+                else
+                    local live = Workspace:GetAttribute("Seconds")
+                    if type(live) == "number" and live > 0 then
+                        lastMatchSeconds = live
+                    end
                 end
                 matchCount = matchCount + 1
                 local n = matchCount
@@ -1761,8 +1778,10 @@ task.spawn(function()
                 end)
             else
                 -- Rewards screen closed (new mission starting) — drop the
-                -- cache so next match's webhook can't accidentally reuse it.
+                -- cache so next match's webhook can't accidentally reuse it,
+                -- and reset the peak timer so it tracks only THIS mission.
                 latestRewardsCapture = nil
+                missionPeakSeconds = 0
             end
         end
         lastRewardsVisible = v
