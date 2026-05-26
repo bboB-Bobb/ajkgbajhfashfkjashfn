@@ -1010,8 +1010,11 @@ do
             end
             return
         end
-        -- Every other unique GET (deduped at actor side) — discovery log.
-        print(string.format("[SNIFF GET] %s/%s -> type=%s value=%s",
+        -- Every other unique call (deduped at actor side) — discovery log.
+        -- Tag with the remote name so we can tell GET vs GET_2 (the per-
+        -- match remote that only exists in-mission).
+        print(string.format("[SNIFF %s] %s/%s -> type=%s value=%s",
+            tostring(data.remote or "?"),
             tostring(data.service), tostring(data.action),
             type(data.result), tostring(data.result)))
         if type(data.result) == "table" then
@@ -1025,8 +1028,21 @@ local sniffHookSrc = ([[
     local bridge  = CoreGui:WaitForChild(%q, 10)
     if not bridge then return end
 
-    local RS  = game:GetService("ReplicatedStorage")
-    local GET = RS:WaitForChild("Assets"):WaitForChild("Remotes"):WaitForChild("GET")
+    local RS      = game:GetService("ReplicatedStorage")
+    local remotes = RS:WaitForChild("Assets"):WaitForChild("Remotes")
+
+    -- watchedRemotes maps remote-instance -> name. GET is always present;
+    -- GET_2 only exists during a match (game spawns it on mission start,
+    -- destroys it on mission end). Listen for ChildAdded so we catch
+    -- GET_2 the instant it appears.
+    local watchedRemotes = {}
+    local get = remotes:WaitForChild("GET")
+    watchedRemotes[get] = "GET"
+    local get2 = remotes:FindFirstChild("GET_2")
+    if get2 then watchedRemotes[get2] = "GET_2" end
+    remotes.ChildAdded:Connect(function(c)
+        if c:IsA("RemoteFunction") then watchedRemotes[c] = c.Name end
+    end)
 
     local SETID = setthreadidentity or setidentity
     local GETID = getthreadidentity or getidentity
@@ -1043,11 +1059,12 @@ local sniffHookSrc = ([[
         local args = table.pack(...)
 
         local interesting = false
-        if self == GET then
+        local remoteName  = watchedRemotes[self]
+        if remoteName then
             local okC, isExecutor = pcall(checkcaller)
             local okM, m = pcall(getnamecallmethod)
-            -- Capture EVERY game-initiated InvokeServer (broad discovery),
-            -- not just S_Rewards. Dedup happens after we have the result.
+            -- Capture EVERY game-initiated InvokeServer on either remote
+            -- (broad discovery). Dedup happens after we have the result.
             if okC and not isExecutor and okM and m == "InvokeServer" then
                 interesting = true
             end
@@ -1071,34 +1088,28 @@ local sniffHookSrc = ([[
 
         if interesting then
             local returnVal = results[2]
-            -- Dedup key: (service, action, result-type). Same call with same
-            -- result-type fires only once across the whole session, but
+            -- Dedup key: (remote, service, action, result-type). Same call with
+            -- same result-type fires only once across the whole session, but
             -- nil->table transitions (e.g. S_Rewards polling) fire on both.
-            -- Use concatenation (NOT string.format) so the outer
-            -- :format(SNIFF_BRIDGE) on this whole source block doesn't try
-            -- to consume any percent-s style placeholders.
-            local key = tostring(args[1]) .. ":" .. tostring(args[2]) .. ":" .. type(returnVal)
-            if not seenCalls[key] then
-                seenCalls[key] = true
+            local key = remoteName .. ":" .. tostring(args[1]) .. ":" .. tostring(args[2]) .. ":" .. type(returnVal)
+            local function send()
                 pcall(function()
                     bridge:Fire({
+                        remote  = remoteName,
                         service = args[1],
                         action  = args[2],
                         arg3    = args[3],
                         result  = returnVal,
                     })
                 end)
+            end
+            if not seenCalls[key] then
+                seenCalls[key] = true
+                send()
             elseif args[1] == "S_Rewards" then
                 -- Always forward S_Rewards so the webhook gets every
                 -- post-match capture (per-match, not just once per session).
-                pcall(function()
-                    bridge:Fire({
-                        service = args[1],
-                        action  = args[2],
-                        arg3    = args[3],
-                        result  = returnVal,
-                    })
-                end)
+                send()
             end
         end
 
@@ -1675,6 +1686,62 @@ UtilBox:AddButton({
             end
         end
         Library:Notify(string.format("Spy: %d candidate labels in console", count), 4)
+    end,
+})
+
+UtilBox:AddButton({
+    Text = "Probe GET_2",
+    Func = function()
+        local assets = RS:FindFirstChild("Assets")
+        local remotes = assets and assets:FindFirstChild("Remotes")
+        local g2 = remotes and remotes:FindFirstChild("GET_2")
+        if not g2 then
+            warn("[GET_2] not found — run this mid-match (GET_2 only exists during a mission)")
+            Library:Notify("GET_2 not found — must be in a match", 4)
+            return
+        end
+
+        local function deep(t, indent, seen)
+            indent = indent or "   "
+            seen = seen or {}
+            if seen[t] then print(indent .. "<cyclic>") return end
+            seen[t] = true
+            for k, v in pairs(t) do
+                if type(v) == "table" then
+                    print(indent .. tostring(k) .. " = {")
+                    deep(v, indent .. "  ", seen)
+                    print(indent .. "}")
+                else
+                    print(indent .. tostring(k) .. " = " .. tostring(v) .. "  (" .. type(v) .. ")")
+                end
+            end
+        end
+
+        local function try(label, ...)
+            local ok, r = pcall(g2.InvokeServer, g2, ...)
+            print(string.format("[GET_2 %-18s] ok=%s type=%s value=%s",
+                label, tostring(ok), type(r), tostring(r)))
+            if type(r) == "table" then deep(r) end
+        end
+
+        try("(no args)")
+        try("Get",               "Get")
+        try("Get LP",            "Get", LocalPlayer)
+        try("Get Stats",         "Get", "Stats")
+        try("Get Player",        "Get", "Player")
+        try("Get Currency",      "Get", "Currency")
+        try("Get Profile",       "Get", "Profile")
+        try("Get Gold",          "Get", "Gold")
+        try("Get Gems",          "Get", "Gems")
+        try("S_Player/Get",      "S_Player", "Get")
+        try("S_Profile/Get",     "S_Profile", "Get")
+        try("S_Currency/Get",    "S_Currency", "Get")
+        try("S_Data/Get",        "S_Data", "Get")
+        try("S_Stats/Get",       "S_Stats", "Get")
+        try("S_Rewards/Get true","S_Rewards", "Get", true)
+        try("S_Rewards/Get All", "S_Rewards", "Get", "All")
+
+        Library:Notify("GET_2 probe dumped to console", 4)
     end,
 })
 
