@@ -1849,42 +1849,41 @@ task.spawn(function()
                 bumpGamesPlayed()  -- persistent total (saved to file)
                 local n = matchCount
                 task.spawn(function()
-                    -- Fire Data/Copy refresh in parallel (network overlap).
-                    task.spawn(function()
+                    -- Poll BOTH Data/Copy and S_Rewards/Get/"Last" in the
+                    -- same loop until each returns a populated table.
+                    -- Both have a one-shot-drain quirk: first call after
+                    -- match end may return nil while the server is still
+                    -- staging data; subsequent calls (every 300ms) succeed
+                    -- within 1-3s typically. Stop polling each remote as
+                    -- soon as it gives us a table. Hard timeout: 10s.
+                    local pollStart = tick()
+                    while tick() - pollStart < 10 do
+                        local needData = not (latestPlayerData
+                            and type(latestPlayerData.data) == "table")
+                        local needRwds = not (latestRewardsCapture
+                            and type(latestRewardsCapture.data) == "table")
+                        if not needData and not needRwds then break end
+
                         local assets  = RS:FindFirstChild("Assets")
                         local remotes = assets and assets:FindFirstChild("Remotes")
                         local GET     = remotes and remotes:FindFirstChild("GET")
                         if GET then
-                            local ok, result = pcall(GET.InvokeServer, GET, "Data", "Copy")
-                            if ok and type(result) == "table" then
-                                latestPlayerData = { ts = tick(), data = result }
+                            if needData then
+                                local ok, result = pcall(GET.InvokeServer,
+                                    GET, "Data", "Copy")
+                                if ok and type(result) == "table" then
+                                    latestPlayerData = { ts = tick(), data = result }
+                                end
                             end
-                        end
-                    end)
-
-                    -- Actively poll S_Rewards/Get/"Last" (non-consuming
-                    -- variant) until the server returns a populated table.
-                    -- Server typically takes 1-3s after match end to have
-                    -- the rewards data ready. Poll every 300ms up to 8s
-                    -- total. Cache the result so sendMatchWebhook reads it
-                    -- via its existing fetchRewardsRemote path.
-                    if not (latestRewardsCapture
-                            and type(latestRewardsCapture.data) == "table") then
-                        local pollStart = tick()
-                        while tick() - pollStart < 8 do
-                            local assets  = RS:FindFirstChild("Assets")
-                            local remotes = assets and assets:FindFirstChild("Remotes")
-                            local GET     = remotes and remotes:FindFirstChild("GET")
-                            if GET then
+                            if needRwds then
                                 local ok, r = pcall(GET.InvokeServer,
                                     GET, "S_Rewards", "Get", "Last")
                                 if ok and type(r) == "table" then
                                     latestRewardsCapture = { ts = tick(), data = r }
-                                    break
                                 end
                             end
-                            task.wait(0.3)
                         end
+                        task.wait(0.3)
                     end
 
                     if Toggles.WebhookEnabled and Toggles.WebhookEnabled.Value then
