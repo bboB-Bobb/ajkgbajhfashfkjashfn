@@ -72,6 +72,11 @@ local getMoney
 -- handler inside the sniffer section.
 local latestRewardsCapture = nil  -- { ts = number, data = table } | nil
 
+-- Built once at script load by requiring RS.Modules.Storage.Perks. Maps
+-- perk name -> rarity ("Common"/"Rare"/"Epic"/"Legendary"/"Mythic").
+-- Used in the webhook embed so each obtained perk is tagged with rarity.
+local PERK_RARITY = {}
+
 --===========================================================
 -- Common helpers
 --===========================================================
@@ -905,6 +910,35 @@ local function getGET()
     return remotes and remotes:FindFirstChild("GET")
 end
 
+--------- Perk rarity LUT (built once from RS.Modules.Storage.Perks) ---------
+-- Perks module shape (confirmed via Dump Perks + Stats):
+--   { Common={Focus={Stats=..,Type=..}, Lightweight={...}, ...},
+--     Rare={...}, Epic={...}, Legendary={...}, Mythic={...},
+--     Check=fn, Setup=fn, Get_Converted_Stat=fn }
+-- Walk each rarity bucket's keys to build a flat perkName -> rarity map.
+do
+    local ok, perksMod = pcall(function()
+        return require(RS:WaitForChild("Modules"):WaitForChild("Storage"):WaitForChild("Perks"))
+    end)
+    if ok and type(perksMod) == "table" then
+        for _, rarity in ipairs({ "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic" }) do
+            local bucket = perksMod[rarity]
+            if type(bucket) == "table" then
+                for perkName, _ in pairs(bucket) do
+                    if type(perkName) == "string" then
+                        PERK_RARITY[perkName] = rarity
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function formatPerkWithRarity(name)
+    local r = PERK_RARITY[name]
+    return r and string.format("%s [%s]", name, r) or tostring(name)
+end
+
 --------- Path A: S_Rewards Actor-side passive sniffer ---------
 -- Our main-thread GET("S_Rewards","Get",...) calls come back nil. The game's
 -- own client script fires the same remote and presumably gets real data.
@@ -1382,9 +1416,13 @@ sendMatchWebhook = function(matchNum)
                 obtainedLines[#obtainedLines + 1] = string.format("%s: %s", k, tostring(v))
             end
         end
-        -- Perks (string list)
+        -- Perks (string list) — tag each with rarity via PERK_RARITY LUT
         if type(o.Perks) == "table" and #o.Perks > 0 then
-            obtainedLines[#obtainedLines + 1] = "Perks: " .. table.concat(o.Perks, ", ")
+            local tagged = {}
+            for _, p in ipairs(o.Perks) do
+                tagged[#tagged + 1] = formatPerkWithRarity(p)
+            end
+            obtainedLines[#obtainedLines + 1] = "Perks: " .. table.concat(tagged, ", ")
         end
         -- Drops / Chests (only if populated; empty tables hidden)
         for _, k in ipairs({ "Drops", "Chests" }) do
@@ -1540,6 +1578,74 @@ UtilBox:AddButton({
             end
         end
         Library:Notify(string.format("Spy: %d candidate labels in console", count), 4)
+    end,
+})
+
+UtilBox:AddButton({
+    Text = "Probe Stats.Get",
+    Func = function()
+        local ok, statsMod = pcall(function()
+            return require(RS.Modules.Utilities.Stats)
+        end)
+        if not ok or type(statsMod) ~= "table" or type(statsMod.Get) ~= "function" then
+            warn("[Probe] Stats.Get not available:", statsMod)
+            return
+        end
+
+        local function try(label, ...)
+            local oks, r = pcall(statsMod.Get, ...)
+            print(string.format("[Stats.Get(%s)] ok=%s type=%s value=%s",
+                label, tostring(oks), type(r), tostring(r)))
+            if type(r) == "table" then
+                for k, v in pairs(r) do
+                    print(string.format("    %s = %s  (%s)", tostring(k), tostring(v), type(v)))
+                end
+            end
+        end
+
+        try("(no args)")
+        try("LocalPlayer", LocalPlayer)
+        try("'Gold'", "Gold")
+        try("'Gems'", "Gems")
+        try("'Level'", "Level")
+        try("'Prestige'", "Prestige")
+        try("'Currency'", "Currency")
+        try("'All'", "All")
+        try("LP,'Gold'", LocalPlayer, "Gold")
+        try("LP,'All'", LocalPlayer, "All")
+        try("LP.Name,'Gold'", LocalPlayer.Name, "Gold")
+
+        Library:Notify("Stats.Get probe done — check console", 4)
+    end,
+})
+
+UtilBox:AddButton({
+    Text = "Spy Lobby UI",
+    Func = function()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if not pg then warn("[Spy] no PlayerGui") return end
+        print("\n========== LOBBY UI SCAN ==========\n")
+        local hits = 0
+        local keywords = { "gold", "gem", "level", "prestige", "money", "currency",
+                           "candy", "shard", "cash", "balance", "coin", "stat" }
+        for _, d in ipairs(pg:GetDescendants()) do
+            if d:IsA("TextLabel") or d:IsA("TextBox") then
+                local fp = d:GetFullName():lower()
+                local matched = false
+                for _, kw in ipairs(keywords) do
+                    -- match either in the path (folder/label name) OR digit-only text
+                    if fp:find(kw) then matched = true break end
+                end
+                if matched then
+                    local parentName = d.Parent and d.Parent.Name or "?"
+                    print(string.format("  %s  parent=%s  text=%q",
+                        d:GetFullName(), parentName, d.Text or ""))
+                    hits = hits + 1
+                end
+            end
+        end
+        print(string.format("\n========== %d matches ==========\n", hits))
+        Library:Notify(string.format("Lobby UI: %d candidates in console", hits), 4)
     end,
 })
 
