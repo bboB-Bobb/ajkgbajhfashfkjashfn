@@ -1000,14 +1000,46 @@ local mutedForRetry = false
 local Y_JITTER       = 5    -- ±5 studs hover-height variance per target
 local jitterOffsetY  = 0
 local lastSeenTarget = nil
+-- Tracks parts whose CanCollide we forced to false so we can restore them
+-- when hovering stops. Without this, CFrame steering through a wall makes
+-- the character snag because Roblox tries to resolve the collision.
+local noclippedParts = {}
+
+local function restoreCollisions()
+    for p, _ in pairs(noclippedParts) do
+        if p.Parent then p.CanCollide = true end
+        noclippedParts[p] = nil
+    end
+end
+LocalPlayer.CharacterAdded:Connect(function()
+    -- Old part references are dead after respawn; clear the map.
+    noclippedParts = {}
+end)
 
 RunService.Heartbeat:Connect(function(dt)
-    if not Toggles.AutoKill.Value then return end
-    if mutedForRetry then return end
-    if not Toggles.TPAboveTitan.Value then return end
-    if not currentTarget or not currentTarget.Parent then return end
+    local shouldHover = Toggles.AutoKill.Value
+                    and not mutedForRetry
+                    and Toggles.TPAboveTitan.Value
+                    and currentTarget and currentTarget.Parent
+    if not shouldHover then
+        restoreCollisions()
+        return
+    end
     local nape = getTitanNape(currentTarget); if not nape then return end
     local root = getRoot(); if not root then return end
+
+    -- Noclip body parts so we glide through walls / buildings during
+    -- travel. HumanoidRootPart is already CanCollide=false so the
+    -- `p.CanCollide` guard skips it.
+    local char = LocalPlayer.Character
+    if char then
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") and p.CanCollide then
+                p.CanCollide = false
+                noclippedParts[p] = true
+            end
+        end
+    end
 
     -- Reseed jitter only when target changes; otherwise hover height is
     -- stable per titan (no jittering every frame, which itself would look
