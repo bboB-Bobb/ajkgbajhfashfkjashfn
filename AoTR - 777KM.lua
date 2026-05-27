@@ -1670,36 +1670,37 @@ task.spawn(function()
         local r       = getRewardsFrame()
         local visible = r and r.Visible
 
-        -- "Match is done" gate — true whenever the Rewards screen is up
-        -- AND the field has no living titans. Mute toggled features in this
-        -- state so they don't waste server calls / risk weirdness between
-        -- matches, INDEPENDENT of AutoRetry being on. AutoRetry layers its
-        -- click+remote on top when its toggle is enabled.
+        -- Two separate triggers:
+        --  * mute (matchDone) = Rewards visible AND no living titans.
+        --    Pauses toggled features between matches, INDEPENDENT of
+        --    AutoRetry being on.
+        --  * AutoRetry         = Rewards visible (period). Fires on both
+        --    win AND death — death keeps titans alive on the field, so
+        --    gating on titans=0 would miss losses entirely.
         local matchDone = visible and countAliveTitans() == 0
 
-        if matchDone then
-            if not mutedForRetry then
-                mutedForRetry = true
-                -- One tick for the gameplay loops to notice and bail out
-                -- before any retry-click — otherwise an in-flight Slash
-                -- can still be queued the instant Rewards appears.
-                task.wait(0.4)
+        if matchDone and not mutedForRetry then
+            mutedForRetry = true
+            -- One tick for the gameplay loops to notice and bail out
+            -- before any retry-click — otherwise an in-flight Slash
+            -- can still be queued the instant Rewards appears.
+            task.wait(0.4)
+        elseif not visible and mutedForRetry then
+            mutedForRetry = false
+        end
+
+        if visible and Toggles.AutoRetry.Value and tick() > autoRetryCooldown then
+            -- 2s cooldown so we re-fire if the first click/remote
+            -- silently failed; the Rewards frame turning invisible
+            -- naturally stops the loop on success.
+            autoRetryCooldown = tick() + 2
+            task.wait(0.5)
+            local btn = getRetryButton()
+            if btn then clickUI(btn) end
+            local GET = getGET()
+            if GET then
+                pcall(function() GET:InvokeServer("Functions", "Retry", "Add") end)
             end
-            if Toggles.AutoRetry.Value and tick() > autoRetryCooldown then
-                -- 2s cooldown so we re-fire if the first click/remote
-                -- silently failed; the Rewards frame turning invisible
-                -- naturally stops the loop on success.
-                autoRetryCooldown = tick() + 2
-                task.wait(0.5)
-                local btn = getRetryButton()
-                if btn then clickUI(btn) end
-                local GET = getGET()
-                if GET then
-                    pcall(function() GET:InvokeServer("Functions", "Retry", "Add") end)
-                end
-            end
-        else
-            if mutedForRetry then mutedForRetry = false end
         end
         task.wait(0.3)
     end
