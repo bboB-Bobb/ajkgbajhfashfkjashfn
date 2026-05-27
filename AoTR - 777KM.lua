@@ -160,6 +160,16 @@ CombatBox:AddSlider("TPHeight", {
     Suffix  = " studs",
 })
 
+CombatBox:AddSlider("HoverSpeed", {
+    Text    = "Hover speed",
+    Default = 200,
+    Min     = 50,
+    Max     = 1000,
+    Rounding= 0,
+    Suffix  = " studs/s",
+    Tooltip = "Travel speed between titans. Lower = safer vs anti-cheat, slower farm. Higher = faster, more flag risk.",
+})
+
 CombatBox:AddToggle("MultiHit", {
     Text    = "Multi-hit",
     Default = false,
@@ -987,7 +997,6 @@ local mutedForRetry = false
 --   3. AssemblyLinearVelocity set to match the step direction — keeps
 --      reported velocity and actual position-delta consistent (the check
 --      most anti-cheats run) AND cancels gravity so we don't fall.
-local MOVE_SPEED     = 200  -- studs/sec; AoT:R ODM-class speed
 local Y_JITTER       = 5    -- ±5 studs hover-height variance per target
 local jitterOffsetY  = 0
 local lastSeenTarget = nil
@@ -1008,12 +1017,13 @@ RunService.Heartbeat:Connect(function(dt)
         lastSeenTarget = currentTarget
     end
 
+    local moveSpeed = Options.HoverSpeed.Value
     local targetPos = nape.Position + Vector3.new(0, Options.TPHeight.Value + jitterOffsetY, 0)
     local toTarget  = targetPos - root.Position
     local distance  = toTarget.Magnitude
     if distance < 0.1 then return end
 
-    local maxStep = MOVE_SPEED * dt
+    local maxStep = moveSpeed * dt
     local stepLen = math.min(maxStep, distance)
     local direction = toTarget.Unit
     local newPos  = root.Position + direction * stepLen
@@ -1021,13 +1031,13 @@ RunService.Heartbeat:Connect(function(dt)
     -- Preserve current rotation; CFrame.new(pos) * rot keeps orientation.
     root.CFrame = CFrame.new(newPos) * root.CFrame.Rotation
 
-    -- Set velocity to match the move direction at MOVE_SPEED. This (a)
+    -- Set velocity to match the move direction at moveSpeed. This (a)
     -- cancels gravity so we don't fall, (b) makes server-reported velocity
     -- consistent with our position delta. Park (zero velocity) when close.
     if distance < 5 then
         root.AssemblyLinearVelocity = Vector3.zero
     else
-        root.AssemblyLinearVelocity = direction * MOVE_SPEED
+        root.AssemblyLinearVelocity = direction * moveSpeed
     end
 end)
 
@@ -1053,8 +1063,30 @@ task.spawn(function()
             -- slash but keep target/hover state so the player stays in place.
             local paceHold = shouldPaceWait()
 
+            -- Security check: only fire damage when the character is
+            -- actually parked above the current target. Prevents the
+            -- "kills before arrival" issue and looks more legitimate to
+            -- anti-cheat (you damage from where you're physically at,
+            -- not while still traveling halfway across the map).
+            -- Skipped entirely when TPAboveTitan is off (player driving
+            -- manually, may already be in range).
+            local atTitan = true
+            if Toggles.TPAboveTitan.Value and target then
+                local nape = getTitanNape(target)
+                local root = getRoot()
+                if nape and root then
+                    local desiredY = nape.Position.Y + Options.TPHeight.Value
+                    local horizDist = (Vector3.new(nape.Position.X, 0, nape.Position.Z)
+                                     - Vector3.new(root.Position.X, 0, root.Position.Z)).Magnitude
+                    local vertDist = math.abs(root.Position.Y - desiredY)
+                    -- Within ~15 studs horizontally + ~20 studs vertically
+                    -- counts as "above the titan, ready to hit".
+                    atTitan = horizDist <= 15 and vertDist <= 20
+                end
+            end
+
             local POST = getPOST()
-            if POST and not needPause and not paceHold and not refillingNow then
+            if POST and atTitan and not needPause and not paceHold and not refillingNow then
                 -- One Slash unlocks the hit window
                 pcall(function() POST:FireServer("Attacks", "Slash", true) end)
 
